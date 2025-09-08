@@ -1,5 +1,3 @@
-require('dotenv').config(); // load .env at startup
-
 const express = require('express');
 const axios = require('axios');
 const path = require('path');
