@@ -21,7 +21,7 @@ app.get('/api/token', async (req, res) => {
       client_id: CLIENT_ID,
       client_secret: CLIENT_SECRET,
       grant_type: 'client_credentials',
-      scope: 'data:read bucket:read'
+      scope: 'viewables:read'   // <-- use this for the Viewer
     });
     const { data } = await axios.post(
       'https://developer.api.autodesk.com/authentication/v2/token',
