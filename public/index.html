@@ -42,13 +42,16 @@
     }
     #toast.show { opacity: .95; }
 
-    /* --- Dashboard button (TOP RIGHT) --- */
+    /* --- Dashboard button --- */
     #openDashBtn {
-      position: fixed; top: 16px; right: 16px; z-index: 7;
+      position: fixed; top: 20px; left: 20px; z-index: 7;
       background: linear-gradient(135deg, #0ea5e9, #2563eb);
-      color: #fff; border: none; padding: 10px 14px; border-radius: 999px;
-      font: 600 13px/1 system-ui, sans-serif; cursor: pointer;
+      color: #fff; border: none; border-radius: 999px;
+      font: 600 15px/1 system-ui, sans-serif; cursor: pointer;
       box-shadow: 0 10px 25px rgba(0,0,0,.25);
+      width: 180px;    
+      height: 50px;   
+      padding: 0;
     }
     #openDashBtn:hover { filter: brightness(1.05); }
 
@@ -56,7 +59,7 @@
     #dashPanel {
       position: fixed; left: 0; top: 0; height: 100%; width: 100vw; /* 100% width on small screens */
       background: #0b0b0b; color:#fff; z-index: 10; display: grid; grid-template-rows: auto 1fr;
-      box-shadow: 12px 0 32px rgba(0,0,0,.4);
+      box-shadow: 12px 0 32px rgba(0,0,0,.4); /* shadow on right edge now */
       transform: translateX(-100%); transition: transform .25s ease;
       border-right: 1px solid #222;
     }
@@ -134,7 +137,7 @@
   <!-- Dashboard Panel (slides from LEFT) -->
   <div id="dashPanel" aria-hidden="true">
     <div id="dashHdr">
-      <div class="ttl">Node-RED Dashboard</div>
+      <div class="ttl"></div>
       <button class="x" id="dashClose" type="button">Close</button>
     </div>
     <iframe id="dashFrame" src="about:blank" title="Node-RED Dashboard"></iframe>
@@ -144,7 +147,7 @@
   <div id="modalMask" role="dialog" aria-modal="true" aria-labelledby="authTitle">
     <div id="authModal">
       <h3 id="authTitle">Enter password to control devices</h3>
-      <p>Controls are locked. Enter the access password to toggle devices. This will stay unlocked for up to <strong>6 hours</strong> or until you reload the page.</p>
+      <p>Controls are locked. Enter the access password to toggle devices. This will stay unlocked for up to <strong>12 hours</strong> or until you reload the page.</p>
       <div class="field">
         <input id="pwInput" type="password" placeholder="Password" autocomplete="off" />
       </div>
@@ -165,9 +168,7 @@
     const BASE_API = 'https://twindashboard.davidiyiola.com';
     const AUTH_BEARER = 'v1.dtlab.7b1e989d7b5248fbb1f93539e4f9b9a2.7a1c0fc0e2d64f0a8d7a3f28e9fd4a82';
 
-    // thresholds
-    const ON_HIGH_W_THRESHOLD = 16.0; // ON & >=16W => olive green
-    const WEIRD_POWER_W_THRESHOLD = 1.0; // OFF & >=1W => weird (red)
+    const POWER_ON_W_THRESHOLD = 1.0;
 
     let viewer, hideTimer=null, lastDbIdForMenu=null;
     const latestStatus = new Map();    // dbId -> status
@@ -181,7 +182,7 @@
     let pendingAction = null;
 
     function isAuthed(){ return Date.now() < authExpiresAt; }
-    function setAuthed(hours=6){
+    function setAuthed(hours=12){
       authExpiresAt = Date.now() + hours*60*60*1000;
       clearTimeout(authClearTimer);
       authClearTimer = setTimeout(() => { authExpiresAt = 0; }, hours*60*60*1000);
@@ -281,44 +282,29 @@
     dashClose.addEventListener('click', closeDash);
     window.addEventListener('keydown', (e)=>{ if (e.key === 'Escape') closeDash(); });
 
-    /* ---------------- Theming (UPDATED COLORS) ---------------- */
-    const COLOR_OFF_OR_UNKNOWN = new THREE.Vector4(0.00, 0.00, 0.00, 1.0); // black
-    const COLOR_ON_LOW         = new THREE.Vector4(0.55, 0.55, 0.55, 1.0); // gray (ON but <16W or power unknown)
-    const COLOR_ON_HIGH        = new THREE.Vector4(0.60, 0.75, 0.39, 1.0); // olive green
-    const COLOR_WEIRD          = new THREE.Vector4(0.90, 0.20, 0.20, 1.0); // red
+    /* ---------------- Theming ---------------- */
+    const COLOR_ON    = new THREE.Vector4(0.60, 0.75, 0.39, 1.0); // yellow
+    const COLOR_OFF   = new THREE.Vector4(0.55, 0.55, 0.55, 1.0); // gray
+    const COLOR_WEIRD = new THREE.Vector4(0.90, 0.20, 0.20, 1.0); // red
 
     function setThemeColor(dbId, vec4) {
       if (viewer.setThemingColor) viewer.setThemingColor(dbId, vec4, viewer.model, true);
       else if (viewer.model?.setThemingColor) viewer.model.setThemingColor(dbId, vec4, true);
       viewer.impl.sceneUpdated(true);
     }
-    // Optimistic helpers for button clicks:
-    function colorOn(dbId){ setThemeColor(dbId, COLOR_ON_LOW); }             // default ON optimistic: gray
-    function colorOff(dbId){ setThemeColor(dbId, COLOR_OFF_OR_UNKNOWN); }    // OFF/unknown: black
+    function colorOn(dbId){ setThemeColor(dbId, COLOR_ON); }
+    function colorOff(dbId){ setThemeColor(dbId, COLOR_OFF); }
     function colorWeird(dbId){ setThemeColor(dbId, COLOR_WEIRD); }
 
-    // Final coloring from telemetry:
     function colorFromTelemetry(dbId, relay, power_w) {
       const pw = Number(power_w);
-      const hasPw = Number.isFinite(pw);
-      const relayUp = String(relay).toUpperCase();
-
-      // Weird condition: explicitly OFF but drawing power (>= 1W)
-      if (relayUp === 'OFF' && hasPw && pw >= WEIRD_POWER_W_THRESHOLD) {
-        colorWeird(dbId); return 'weird';
+      const isOff = String(relay).toUpperCase() === 'OFF';
+      const weird = isOff && Number.isFinite(pw) && pw >= POWER_ON_W_THRESHOLD;
+      if (weird) { colorWeird(dbId); return 'weird'; }
+      if (String(relay).toUpperCase() === 'ON' || (Number.isFinite(pw) && pw >= POWER_ON_W_THRESHOLD)) {
+        colorOn(dbId); return 'on';
       }
-
-      // OFF or unknown relay → black
-      if (relayUp !== 'ON') {
-        colorOff(dbId); return 'off';
-      }
-
-      // ON:
-      if (hasPw && pw >= ON_HIGH_W_THRESHOLD) {
-        setThemeColor(dbId, COLOR_ON_HIGH); return 'on-high';
-      } else {
-        setThemeColor(dbId, COLOR_ON_LOW);  return 'on-low';
-      }
+      colorOff(dbId); return 'off';
     }
 
     /* ---------------- Menu anchor helpers ---------------- */
@@ -344,7 +330,7 @@
       let pageY = rect.top  + pt.y + window.scrollY;
 
       const pad = 16, minX=rect.left+window.scrollX+pad, minY=rect.top+window.scrollY+pad,
-            maxX=rect.left+window.scrollX+rect.width-pad, maxY=rect.top+window.scrollY+rect.height-pad;
+            maxX=rect.left+window.scrollY+rect.width-pad, maxY=rect.top+window.scrollY+rect.height-pad;
       pageX = Math.max(minX, Math.min(pageX, maxX));
       pageY = Math.max(minY, Math.min(pageY, maxY));
       return { x: Math.round(pageX), y: Math.round(pageY) };
@@ -497,7 +483,7 @@
       document.getElementById('tUpdated').textContent = timeAgo(r.ts);
 
       const pw = Number(r.power_w);
-      const weird = (String(r.relay).toUpperCase() === 'OFF') && Number.isFinite(pw) && pw >= WEIRD_POWER_W_THRESHOLD;
+      const weird = (String(r.relay).toUpperCase() === 'OFF') && Number.isFinite(pw) && pw >= POWER_ON_W_THRESHOLD;
       document.getElementById('tNote').textContent = weird ? 'Power draw while OFF' : '—';
       tele.style.display = 'grid';
     }
@@ -574,7 +560,7 @@
           onBtn.onclick  = () => requireAuthThen(async () => {
             setMenuBusy(true);
             try {
-              for (const id of getGroupDbIds(selectedDbId)) colorOn(id);   // optimistic (gray)
+              for (const id of getGroupDbIds(selectedDbId)) colorOn(id);   // optimistic group color
               await postToggle(selectedDbId, 'on',  { timeoutMs: 15000 });
               toast('Turned ON', 'ok');
               refreshBurst();
@@ -599,7 +585,7 @@
           offBtn.onclick = () => requireAuthThen(async () => {
             setMenuBusy(true);
             try {
-              for (const id of getGroupDbIds(selectedDbId)) colorOff(id);  // black
+              for (const id of getGroupDbIds(selectedDbId)) colorOff(id);  // optimistic group color
               await postToggle(selectedDbId, 'off', { timeoutMs: 15000 });
               toast('Turned OFF', 'ok');
               refreshBurst();
