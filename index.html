@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>APS Viewer</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet"
+    href="https://developer.api.autodesk.com/modelderivative/v2/viewers/7.*/style.min.css"/>
+  <style>
+    html, body, #viewer { margin:0; padding:0; width:100%; height:100%; overflow:hidden; }
+
+    /* Optional badge (unused in your snippet) */
+    #badge {
+      position: absolute; top:10px; left:10px; z-index: 5;
+      background:#111; color:#fff; font: 14px/1 system-ui, sans-serif;
+      padding:10px 14px; border-radius:8px; opacity:.85;
+      pointer-events: none;
+    }
+
+    /* Bigger, clearer dashboard button */
+    #dashBtn {
+      position: absolute; top:30px; left:30px; z-index:6;
+      background:#0d6efd; color:#fff; border:0; border-radius:14px;
+      padding:14px 18px; font: 700 16px/1 system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+      cursor:pointer;
+      box-shadow: 0 12px 28px rgba(13,110,253,.35);
+      transition: transform .08s ease, box-shadow .08s ease, background .08s ease;
+    }
+    #dashBtn:active { transform: translateY(1px); background:#3b6ad1; box-shadow: 0 8px 18px rgba(13,110,253,.28); }
+
+    /* Tagline just under the button */
+    #tagline {
+      position: absolute; left:30px; top:80px; z-index:5;
+      color:#fff; text-shadow: 0 1px 2px rgba(0,0,0,.35);
+      font: italic 14px/1.2 system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+      pointer-events: none;
+    }
+
+    /* Overlay for Node-RED dashboard */
+    #overlay {
+      position: fixed; inset:0; display:none; place-items:center; z-index: 10;
+      background: rgba(0,0,0,.35);
+      backdrop-filter: blur(2px);
+    }
+    #panel {
+      width:80vw; height:80vh; background:#fff; border-radius:14px; overflow:hidden;
+      box-shadow: 0 20px 60px rgba(0,0,0,.35); position: relative;
+      display: grid; grid-template-rows: auto 1fr; gap: 0;
+    }
+    #panel iframe { width:100%; height:100%; border:0; background:#fff; }
+    #close {
+      position:absolute; top:8px; right:8px; z-index:11;
+      background: #111; color:#fff; border:0; border-radius:999px;
+      width:36px; height:36px; cursor:pointer; font-weight:700;
+    }
+
+    /* Mobile: make the dashboard panel full-screen */
+    @media (max-width: 640px) {
+      #panel { width:100%; height:100dvh; border-radius:0; }
+      #tagline { display:none; } /* keep the top-left uncluttered on phones */
+    }
+  </style>
+</head>
+<body>
+  <div id="viewer"></div>
+
+  <button id="dashBtn">Open Dashboard</button>
+  <div id="tagline"><em>A project by David, Dr. Biju, Dr. Uddin</em></div>
+
+  <div id="overlay" role="dialog" aria-modal="true">
+    <div id="panel">
+      <button id="close" title="Close">✕</button>
+      <iframe id="dashFrame"
+        src="https://arrest-tennessee-pty-wrestling.trycloudflare.com/ui"
+        loading="eager"
+        referrerpolicy="no-referrer"
+        allowfullscreen>
+      </iframe>
+    </div>
+  </div>
+
+  <script src="https://developer.api.autodesk.com/modelderivative/v2/viewers/7.*/viewer3D.min.js"></script>
+  <script>
+    function getAccessToken(onTokenReady) {
+      fetch('/api/token')
+        .then(r => r.json())
+        .then(d => onTokenReady(d.access_token, d.expires_in))
+        .catch(err => console.error('Token error:', err));
+    }
+
+    Autodesk.Viewing.Initializer(
+      { env: 'AutodeskProduction', api: 'derivativeV2', region: 'US', getAccessToken },
+      function () {
+        const viewer = new Autodesk.Viewing.GuiViewer3D(document.getElementById('viewer'));
+        const started = viewer.start();
+        if (started !== 0) { console.error('Viewer start failed:', started); return; }
+
+        const urn = 'urn:dXJuOmFkc2sub2JqZWN0czpvcy5vYmplY3Q6d3doX2RpZ2l0YWxfdHdpbl9jbGFzc3Jvb20vV1dIX0xhYl8wMTUucnZ0';
+
+        Autodesk.Viewing.Document.load(
+          urn,
+          function (doc) {
+            const defaultModel = doc.getRoot().getDefaultGeometry();
+            viewer.loadDocumentNode(doc, defaultModel, {})
+              .then(() => console.log('Model loaded'))
+              .catch(e => console.error('loadDocumentNode error:', e));
+          },
+          function (code) { console.error('Document.load error:', code); }
+        );
+
+        viewer.addEventListener(Autodesk.Viewing.VIEWER_ERROR, e => console.error('VIEWER_ERROR', e));
+      }
+    );
+
+    // Overlay controls
+    const $overlay = document.getElementById('overlay');
+    const $open = document.getElementById('dashBtn');
+    const $close = document.getElementById('close');
+
+    $open.onclick = () => { $overlay.style.display = 'grid'; document.documentElement.style.overflow = 'hidden'; };
+    $close.onclick = () => { $overlay.style.display = 'none'; document.documentElement.style.overflow = ''; };
+    window.addEventListener('keydown', e => { if (e.key === 'Escape') { $overlay.style.display = 'none'; document.documentElement.style.overflow = ''; } });
+    // Click outside the panel to close
+    $overlay.addEventListener('click', (e) => { if (e.target === $overlay) { $overlay.style.display = 'none'; document.documentElement.style.overflow = ''; } });
+  </script>
+</body>
+</html>

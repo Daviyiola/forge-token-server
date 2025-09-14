@@ -2,55 +2,233 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>APS Viewer</title>
+  <title>APS Viewer — Device Toggle via Node-RED</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <link rel="stylesheet"
-    href="https://developer.api.autodesk.com/modelderivative/v2/viewers/7.*/style.min.css"/>
+  <link rel="stylesheet" href="https://developer.api.autodesk.com/modelderivative/v2/viewers/7.*/style.min.css"/>
+
   <style>
     html, body, #viewer { margin:0; padding:0; width:100%; height:100%; overflow:hidden; }
-    #badge {
-      position: absolute; top:10px; left:10px; z-index: 5;
-      background:#111; color:#fff; font: 14px/1 system-ui, sans-serif;
-      padding:10px 14px; border-radius:8px; opacity:.85;
-      pointer-events: none;
+
+    /* Floating selection menu */
+    #selMenu{
+      position:fixed; display:none; z-index:5; min-width:260px;
+      background:#111; color:#fff; border-radius:12px; padding:10px 12px;
+      box-shadow:0 12px 32px rgba(0,0,0,.35); font: 13px/1.3 system-ui, sans-serif;
+      transition: opacity .15s ease;
     }
-    #dashBtn {
-      position: absolute; top:30px; left:30px; z-index:6;
-      background:#0d6efd; color:#fff; border:0; border-radius:10px;
-      padding:10px 14px; font: 14px/1 system-ui, sans-serif; cursor:pointer;
-      box-shadow: 0 6px 20px rgba(0,0,0,.25);
+    #selMenu .title{ font-weight:600; margin-bottom:8px; }
+    #selMenu .btn{
+      width:100%; text-align:left; background:transparent; color:#fff;
+      border:none; padding:8px; border-radius:8px; cursor:pointer;
     }
-    #overlay {
-      position: fixed; inset:0; display:none; place-items:center; z-index: 10;
-      background: rgba(0,0,0,.35);
+    #selMenu .btn:hover{ background:#1e1e1e; }
+    #selMenu hr{ border:none; border-top:1px solid #333; margin:8px 0; }
+    #selMenu .muted { opacity:.75; font-size:12px; margin:6px 0 2px; }
+    #selMenu.busy { pointer-events:none; opacity:.8; }
+
+    /* Telemetry rows */
+    .rows { display:grid; grid-template-columns: 90px 1fr; gap:4px 8px; font-size:12px; margin:6px 0 8px; }
+    .rows div { padding:2px 0; }
+    .k { color:#aaa; }
+    .v { color:#fff; }
+
+    /* Toast */
+    #toast {
+      position: fixed; top: 18px; left: 50%; transform: translateX(-50%);
+      z-index: 11; min-width: 220px; max-width: 420px;
+      background: #333; color: #fff; padding: 10px 14px; border-radius: 10px;
+      font-weight: 600; box-shadow: 0 8px 24px rgba(0,0,0,.25);
+      opacity: 0; transition: opacity .25s ease;
     }
-    #panel {
-      width:80vw; height:80vh; background:#fff; border-radius:14px; overflow:hidden;
-      box-shadow: 0 20px 60px rgba(0,0,0,.35); position: relative;
+    #toast.show { opacity: .95; }
+
+    /* --- Dashboard button --- */
+    #openDashBtn {
+      position: fixed; top: 20px; left: 20px; z-index: 7;
+      background: linear-gradient(135deg, #0ea5e9, #2563eb);
+      color: #fff; border: none; border-radius: 999px;
+      font: 600 15px/1 system-ui, sans-serif; cursor: pointer;
+      box-shadow: 0 10px 25px rgba(0,0,0,.25);
+      width: 180px;    
+      height: 50px;   
+      padding: 0;
     }
-    #panel iframe { width:100%; height:100%; border:0; }
-    #close {
-      position:absolute; top:8px; right:8px; z-index:11;
-      background: #111; color:#fff; border:0; border-radius:999px;
-      width:34px; height:34px; cursor:pointer;
+    #openDashBtn:hover { filter: brightness(1.05); }
+
+    /* --- Dashboard Panel (slides in from LEFT) --- */
+    #dashPanel {
+      position: fixed; left: 0; top: 0; height: 100%; width: 100vw; /* 100% width on small screens */
+      background: #0b0b0b; color:#fff; z-index: 10; display: grid; grid-template-rows: auto 1fr;
+      box-shadow: 12px 0 32px rgba(0,0,0,.4); /* shadow on right edge now */
+      transform: translateX(-100%); transition: transform .25s ease;
+      border-right: 1px solid #222;
     }
+    /* 80% width on larger screens */
+    @media (min-width: 1024px) {
+      #dashPanel { width: 80vw; }
+    }
+    #dashPanel.open { transform: translateX(0%); }
+    #dashHdr { display:flex; align-items:center; justify-content:space-between; gap:8px;
+      padding: 10px 12px; border-bottom: 1px solid #222; background:#111; }
+    #dashHdr .ttl { font: 600 14px/1 system-ui, sans-serif; }
+    #dashHdr .x {
+      background:#1f1f1f; color:#fff; border:none; border-radius:8px; padding:6px 9px; cursor:pointer;
+    }
+    #dashHdr .x:hover { background:#2a2a2a; }
+    #dashFrame { width: 100%; height: 100%; border: 0; background:#0b0b0b; }
+
+    /* --- Password modal --- */
+    #modalMask {
+      position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 12;
+      display:none; align-items: center; justify-content: center;
+    }
+    #authModal {
+      width: min(420px, 92vw); background:#121212; color:#fff; border-radius:14px;
+      box-shadow: 0 25px 60px rgba(0,0,0,.45); padding:16px 16px 14px; border:1px solid #222;
+    }
+    #authModal h3 { margin:0 0 10px; font: 700 16px/1.2 system-ui, sans-serif; }
+    #authModal p { margin:0 0 10px; font: 13px/1.4 system-ui, sans-serif; color:#cfcfcf; }
+    .field { display:flex; gap:8px; margin: 10px 0 12px; }
+    .field input {
+      flex:1; background:#0b0b0b; color:#fff; border:1px solid #2a2a2a; border-radius:10px;
+      padding:10px; outline:none; font: 14px system-ui, sans-serif;
+    }
+    .rowBtns { display:flex; gap:8px; justify-content:flex-end; }
+    .btnP {
+      background:#0ea5e9; color:#fff; border:none; border-radius:10px; padding:10px 12px; cursor:pointer;
+      font: 600 13px/1 system-ui, sans-serif;
+    }
+    .btnS {
+      background:#1f1f1f; color:#fff; border:none; border-radius:10px; padding:10px 12px; cursor:pointer;
+      font: 600 13px/1 system-ui, sans-serif;
+    }
+    .btnP[disabled] { opacity:.6; cursor:not-allowed; }
+    .err { color:#ff6b6b; font: 12px/1.2 system-ui, sans-serif; min-height: 16px; }
   </style>
 </head>
 <body>
   <div id="viewer"></div>
-  
-  <button id="dashBtn">Open Dashboard</button>
 
-  <div id="overlay" role="dialog" aria-modal="true">
-    <div id="panel">
-      <button id="close" title="Close">✕</button>
-      <iframe id="dashFrame"
-        src="https://twindashboard.davidiyiola.com/ui/"></iframe>
+  <!-- Selection popup -->
+  <div id="selMenu" aria-live="polite">
+    <div class="title" id="selTitle">Selected</div>
+
+    <!-- Telemetry (hidden unless this element has state) -->
+    <div id="telemetry" class="rows" style="display:none">
+      <div class="k">Relay</div>   <div class="v" id="tRelay">—</div>
+      <div class="k">Power (W)</div> <div class="v" id="tPower">—</div>
+      <div class="k">Updated</div> <div class="v" id="tUpdated">—</div>
+      <div class="k">Note</div>    <div class="v" id="tNote">—</div>
+    </div>
+
+    <button class="btn" data-action="zoom">Zoom to</button>
+    <button class="btn" data-action="isolate">Isolate</button>
+    <button class="btn" data-action="clear">Clear isolation</button>
+    <hr>
+    <div id="deviceActions"></div>
+  </div>
+
+  <!-- Toast -->
+  <div id="toast" role="status" aria-live="polite"></div>
+
+  <!-- Open Dashboard (TOP RIGHT) -->
+  <button id="openDashBtn" type="button" title="Open Node-RED Dashboard">Open Dashboard</button>
+
+  <!-- Dashboard Panel (slides from LEFT) -->
+  <div id="dashPanel" aria-hidden="true">
+    <div id="dashHdr">
+      <div class="ttl"></div>
+      <button class="x" id="dashClose" type="button">Close</button>
+    </div>
+    <iframe id="dashFrame" src="about:blank" title="Node-RED Dashboard"></iframe>
+  </div>
+
+  <!-- Password Modal -->
+  <div id="modalMask" role="dialog" aria-modal="true" aria-labelledby="authTitle">
+    <div id="authModal">
+      <h3 id="authTitle">Enter password to control devices</h3>
+      <p>Controls are locked. Enter the access password to toggle devices. This will stay unlocked for up to <strong>12 hours</strong> or until you reload the page.</p>
+      <div class="field">
+        <input id="pwInput" type="password" placeholder="Password" autocomplete="off" />
+      </div>
+      <div class="err" id="pwErr"></div>
+      <div class="rowBtns">
+        <button class="btnS" id="pwCancel" type="button">Cancel</button>
+        <button class="btnP" id="pwSubmit" type="button" disabled>Unlock</button>
+      </div>
     </div>
   </div>
 
   <script src="https://developer.api.autodesk.com/modelderivative/v2/viewers/7.*/viewer3D.min.js"></script>
   <script>
+    /* ---------------- Config ---------------- */
+    const URN = 'urn:dXJuOmFkc2sub2JqZWN0czpvcy5vYmplY3Q6d3doX2RpZ2l0YWxfdHdpbl9sYWIvV1dIX0xhYl8wMTUucnZ0';
+    const DEVICE_DBIDS = new Set([2245, 2244, 2226, 2227, 2200]);
+
+    const BASE_API = 'https://twindashboard.davidiyiola.com';
+    const AUTH_BEARER = 'v1.dtlab.7b1e989d7b5248fbb1f93539e4f9b9a2.7a1c0fc0e2d64f0a8d7a3f28e9fd4a82';
+
+    const POWER_ON_W_THRESHOLD = 1.0;
+
+    let viewer, hideTimer=null, lastDbIdForMenu=null;
+    const latestStatus = new Map();    // dbId -> status
+    const deviceToDbIds = new Map();   // device -> [dbIds]
+    let pollTimer = null;
+
+    /* ---------- Simple front-end auth (expires on reload or 6h) ---------- */
+    const PASSWORD = 'wilsonwallis';
+    let authExpiresAt = 0;
+    let authClearTimer = null;
+    let pendingAction = null;
+
+    function isAuthed(){ return Date.now() < authExpiresAt; }
+    function setAuthed(hours=12){
+      authExpiresAt = Date.now() + hours*60*60*1000;
+      clearTimeout(authClearTimer);
+      authClearTimer = setTimeout(() => { authExpiresAt = 0; }, hours*60*60*1000);
+    }
+    function requireAuthThen(fn){
+      if (isAuthed()) { fn?.(); return; }
+      pendingAction = fn;
+      openPwModal();
+    }
+
+    // Modal UI
+    const mask = document.getElementById('modalMask');
+    const pwInput = document.getElementById('pwInput');
+    const pwErr = document.getElementById('pwErr');
+    const pwSubmit = document.getElementById('pwSubmit');
+    const pwCancel = document.getElementById('pwCancel');
+
+    function openPwModal(){
+      pwInput.value = '';
+      pwErr.textContent = '';
+      pwSubmit.disabled = true;
+      mask.style.display = 'flex';
+      setTimeout(()=> pwInput.focus(), 0);
+    }
+    function closePwModal(){ mask.style.display = 'none'; pendingAction = null; }
+
+    pwInput.addEventListener('input', ()=>{
+      pwSubmit.disabled = pwInput.value.trim().length === 0;
+      pwErr.textContent = '';
+    });
+
+    function doAuth(){
+      const entered = pwInput.value.trim();
+      if (entered !== PASSWORD) { pwErr.textContent = 'Incorrect password.'; return; }
+      setAuthed(6);
+      closePwModal();
+      toast('Controls unlocked for 6 hours', 'ok');
+      const fn = pendingAction; pendingAction = null;
+      if (typeof fn === 'function') { try { fn(); } catch(e){} }
+    }
+
+    pwSubmit.addEventListener('click', doAuth);
+    pwCancel.addEventListener('click', closePwModal);
+    pwInput.addEventListener('keydown', (e)=>{ if (e.key === 'Enter' && !pwSubmit.disabled) doAuth(); });
+
+    /* ---------------- Autodesk token ---------------- */
     function getAccessToken(onTokenReady) {
       fetch('/api/token')
         .then(r => r.json())
@@ -58,38 +236,385 @@
         .catch(err => console.error('Token error:', err));
     }
 
+    /* ---------------- Viewer boot ---------------- */
     Autodesk.Viewing.Initializer(
-      { env: 'AutodeskProduction', api: 'derivativeV2', region: 'US', getAccessToken },
+      { env:'AutodeskProduction', api:'derivativeV2', region:'US', getAccessToken },
       function () {
-        const viewer = new Autodesk.Viewing.GuiViewer3D(document.getElementById('viewer'));
+        viewer = new Autodesk.Viewing.GuiViewer3D(document.getElementById('viewer'));
         const started = viewer.start();
         if (started !== 0) { console.error('Viewer start failed:', started); return; }
 
-        const urn = 'urn:dXJuOmFkc2sub2JqZWN0czpvcy5vYmplY3Q6d3doX2RpZ2l0YWxfdHdpbl9sYWIvV1dIX0xhYl8wMTUucnZ0';
-
         Autodesk.Viewing.Document.load(
-          urn,
-          function (doc) {
-            const defaultModel = doc.getRoot().getDefaultGeometry();
-            viewer.loadDocumentNode(doc, defaultModel, {})
-              .then(() => console.log('Model loaded'))
+          URN,
+          (doc) => {
+            const node = doc.getRoot().getDefaultGeometry();
+            viewer.loadDocumentNode(doc, node, {})
+              .then(async () => {
+                console.log('Model loaded');
+                setupSelectionMenu();
+                await applyLiveColors(); // initial
+                schedulePolling();       // steady polling
+              })
               .catch(e => console.error('loadDocumentNode error:', e));
           },
-          function (code) { console.error('Document.load error:', code); }
+          (err) => console.error('Document.load error:', err)
         );
-
-        viewer.addEventListener(Autodesk.Viewing.VIEWER_ERROR, e => console.error('VIEWER_ERROR', e));
       }
     );
 
-    // Overlay controls
-    const $overlay = document.getElementById('overlay');
-    const $open = document.getElementById('dashBtn');
-    const $close = document.getElementById('close');
+    /* ---------------- Dashboard panel logic (LEFT slide) ---------------- */
+    const openDashBtn = document.getElementById('openDashBtn');
+    const dashPanel = document.getElementById('dashPanel');
+    const dashClose = document.getElementById('dashClose');
+    const dashFrame = document.getElementById('dashFrame');
+    const DASH_URL = BASE_API.replace(/\/$/,'') + '/ui';
 
-    $open.onclick = () => ($overlay.style.display = 'grid');
-    $close.onclick = () => ($overlay.style.display = 'none');
-    window.addEventListener('keydown', e => { if (e.key === 'Escape') $overlay.style.display = 'none'; });
+    function openDash(){
+      if (dashFrame.src === 'about:blank') dashFrame.src = DASH_URL;
+      dashPanel.classList.add('open');
+      dashPanel.setAttribute('aria-hidden','false');
+    }
+    function closeDash(){
+      dashPanel.classList.remove('open');
+      dashPanel.setAttribute('aria-hidden','true');
+    }
+    openDashBtn.addEventListener('click', openDash);
+    dashClose.addEventListener('click', closeDash);
+    window.addEventListener('keydown', (e)=>{ if (e.key === 'Escape') closeDash(); });
+
+    /* ---------------- Theming ---------------- */
+    const COLOR_ON    = new THREE.Vector4(0.60, 0.75, 0.39, 1.0); // yellow
+    const COLOR_OFF   = new THREE.Vector4(0.55, 0.55, 0.55, 1.0); // gray
+    const COLOR_WEIRD = new THREE.Vector4(0.90, 0.20, 0.20, 1.0); // red
+
+    function setThemeColor(dbId, vec4) {
+      if (viewer.setThemingColor) viewer.setThemingColor(dbId, vec4, viewer.model, true);
+      else if (viewer.model?.setThemingColor) viewer.model.setThemingColor(dbId, vec4, true);
+      viewer.impl.sceneUpdated(true);
+    }
+    function colorOn(dbId){ setThemeColor(dbId, COLOR_ON); }
+    function colorOff(dbId){ setThemeColor(dbId, COLOR_OFF); }
+    function colorWeird(dbId){ setThemeColor(dbId, COLOR_WEIRD); }
+
+    function colorFromTelemetry(dbId, relay, power_w) {
+      const pw = Number(power_w);
+      const isOff = String(relay).toUpperCase() === 'OFF';
+      const weird = isOff && Number.isFinite(pw) && pw >= POWER_ON_W_THRESHOLD;
+      if (weird) { colorWeird(dbId); return 'weird'; }
+      if (String(relay).toUpperCase() === 'ON' || (Number.isFinite(pw) && pw >= POWER_ON_W_THRESHOLD)) {
+        colorOn(dbId); return 'on';
+      }
+      colorOff(dbId); return 'off';
+    }
+
+    /* ---------------- Menu anchor helpers ---------------- */
+    function getDbIdPagePointFromFragments(dbId) {
+      const model = viewer.model;
+      if (!model) return null;
+      const it = model.getData().instanceTree;
+      const frags = model.getFragmentList();
+      if (!it || !frags) return null;
+
+      const bbox = new THREE.Box3(); let hasAny = false;
+      it.enumNodeFragments(dbId, (fragId) => {
+        const fb = new THREE.Box3(); frags.getWorldBounds(fragId, fb);
+        if (!hasAny) { bbox.copy(fb); hasAny = true; } else bbox.union(fb);
+      }, true);
+      if (!hasAny || !isFinite(bbox.min.x)) return null;
+
+      const center = bbox.getCenter(new THREE.Vector3());
+      const pt = viewer.worldToClient(center);
+      const rect = viewer.container.getBoundingClientRect();
+
+      let pageX = rect.left + pt.x + window.scrollX;
+      let pageY = rect.top  + pt.y + window.scrollY;
+
+      const pad = 16, minX=rect.left+window.scrollX+pad, minY=rect.top+window.scrollY+pad,
+            maxX=rect.left+window.scrollY+rect.width-pad, maxY=rect.top+window.scrollY+rect.height-pad;
+      pageX = Math.max(minX, Math.min(pageX, maxX));
+      pageY = Math.max(minY, Math.min(pageY, maxY));
+      return { x: Math.round(pageX), y: Math.round(pageY) };
+    }
+
+    function showSelectionMenu(x, y, title){
+      const el = document.getElementById('selMenu');
+      document.getElementById('selTitle').textContent = title || 'Selected';
+      el.style.left = (x + 14) + 'px';
+      el.style.top  = (y + 14) + 'px';
+      el.style.display = 'block';
+      clearTimeout(hideTimer);
+      hideTimer = setTimeout(hideSelectionMenu, 8000);
+    }
+    function hideSelectionMenu(){
+      const el = document.getElementById('selMenu');
+      el.style.display = 'none';
+      el.classList.remove('busy');
+      clearTimeout(hideTimer); hideTimer = null;
+      lastDbIdForMenu = null;
+      document.getElementById('deviceActions').innerHTML = '';
+      document.getElementById('telemetry').style.display = 'none';
+    }
+    function showSelectionMenuAtDbId(dbId, title){
+      lastDbIdForMenu = dbId;
+      const p = getDbIdPagePointFromFragments(dbId);
+      if (!p) return hideSelectionMenu();
+      showSelectionMenu(p.x, p.y, title);
+    }
+    function updateMenuPositionIfVisible(){
+      if (!lastDbIdForMenu) return;
+      const p = getDbIdPagePointFromFragments(lastDbIdForMenu);
+      if (!p) return hideSelectionMenu();
+      const el = document.getElementById('selMenu');
+      el.style.left = (p.x + 14) + 'px';
+      el.style.top  = (p.y + 14) + 'px';
+    }
+
+    /* ---------------- Small UX helpers ---------------- */
+    function setMenuBusy(busy=true){
+      const el = document.getElementById('selMenu');
+      if (!el) return;
+      el.classList.toggle('busy', !!busy);
+    }
+    function toast(msg, kind='info'){
+      const el = document.getElementById('toast');
+      if (!el) return;
+      el.textContent = msg || '';
+      el.style.background = (kind==='ok') ? '#0ea5e9' : (kind==='error') ? '#b00020' : '#333';
+      el.classList.add('show');
+      clearTimeout(toast._t);
+      toast._t = setTimeout(()=> el.classList.remove('show'), 2400);
+    }
+    function timeAgo(ts){
+      if (!ts) return '—';
+      const s = Math.max(0, Math.floor((Date.now()-ts)/1000));
+      if (s < 60) return `${s}s ago`;
+      const m = Math.floor(s/60); if (m < 60) return `${m}m ago`;
+      const h = Math.floor(m/60); return `${h}h ago`;
+    }
+
+    /* ---------------- API calls ---------------- */
+    async function postToggle(dbId, action, {timeoutMs=15000} = {}){
+      const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), timeoutMs);
+      const url = (BASE_API.replace(/\/$/, '')) + '/api/device/toggle';
+      const res = await fetch(url, {
+        method:'POST',
+        headers:{ 'Content-Type':'application/json', ...(AUTH_BEARER ? { Authorization:'Bearer '+AUTH_BEARER } : {}) },
+        body: JSON.stringify({ dbId, action }),
+        mode:'cors', signal: ctl.signal
+      }).catch(err => { throw new Error('Network error: ' + (err?.message || String(err))); });
+      clearTimeout(t);
+      if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text().catch(()=>'')) || res.statusText}`);
+      const data = await res.json().catch(()=> ({}));
+      if (!data || data.ok !== true) throw new Error('Backend returned ok=false');
+      return data;
+    }
+
+    async function fetchStatus(dbIds, {timeoutMs=8000} = {}) {
+      const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), timeoutMs);
+      const qs = new URLSearchParams({ dbIds: dbIds.join(',') }).toString();
+      const res = await fetch((BASE_API.replace(/\/$/,'')) + '/api/device/status?' + qs, {
+        method:'GET', mode:'cors', signal: ctl.signal
+      }).catch(err => { throw new Error('Network error: ' + (err.message || err)); });
+      clearTimeout(t);
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      return res.json();
+    }
+
+    /* ---------------- Status + adaptive polling ---------------- */
+    function getGroupDbIds(dbId){
+      const row = latestStatus.get(dbId);
+      if (!row || !row.device) return [dbId];
+      return deviceToDbIds.get(row.device) || [dbId];
+    }
+
+    async function applyLiveColors() {
+      try {
+        const dbIds = Array.from(DEVICE_DBIDS);
+        const data = await fetchStatus(dbIds, { timeoutMs: 8000 });
+        if (!data || data.ok !== true) return;
+
+        // rebuild device->dbIds index from fresh payload
+        deviceToDbIds.clear();
+        for (const row of data.devices || []) {
+          if (!row || typeof row.dbId !== 'number') continue;
+          latestStatus.set(row.dbId, row);
+          if (row.device) {
+            const arr = deviceToDbIds.get(row.device) || [];
+            arr.push(row.dbId);
+            deviceToDbIds.set(row.device, arr);
+          }
+          colorFromTelemetry(row.dbId, row.relay, row.power_w);
+        }
+
+        // refresh telemetry if the menu is open on a device
+        if (lastDbIdForMenu && latestStatus.has(lastDbIdForMenu)) {
+          updateTelemetryUI(lastDbIdForMenu, latestStatus.get(lastDbIdForMenu));
+        }
+      } catch (e) {
+        console.warn('Status refresh failed:', e);
+      }
+    }
+
+    function schedulePolling(ms = 10000){
+      clearInterval(pollTimer);
+      pollTimer = setInterval(applyLiveColors, ms);
+    }
+    document.addEventListener('visibilitychange', ()=>{
+      if (document.hidden) { clearInterval(pollTimer); }
+      else { applyLiveColors(); schedulePolling(); }
+    });
+
+    async function refreshBurst(){
+      for (let i=0; i<5; i++){
+        await applyLiveColors();
+        await new Promise(r => setTimeout(r, 1000));
+      }
+      schedulePolling(); // back to steady 10s
+    }
+
+    /* ---------------- Telemetry UI ---------------- */
+    function updateTelemetryUI(dbId, row){
+      const tele = document.getElementById('telemetry');
+      const r = row || latestStatus.get(dbId);
+      if (!r || r.device == null) { tele.style.display = 'none'; return; } // hide if no state
+
+      document.getElementById('tRelay').textContent   = r.relay ?? '—';
+      document.getElementById('tPower').textContent   = (Number.isFinite(r.power_w) ? r.power_w.toFixed(2) : '—');
+      document.getElementById('tUpdated').textContent = timeAgo(r.ts);
+
+      const pw = Number(r.power_w);
+      const weird = (String(r.relay).toUpperCase() === 'OFF') && Number.isFinite(pw) && pw >= POWER_ON_W_THRESHOLD;
+      document.getElementById('tNote').textContent = weird ? 'Power draw while OFF' : '—';
+      tele.style.display = 'grid';
+    }
+
+    /* ---------------- Menu wiring ---------------- */
+    function setupSelectionMenu(){
+      const el = document.getElementById('selMenu');
+      const deviceArea = document.getElementById('deviceActions');
+
+      // Base actions
+      el.addEventListener('click', (ev)=>{
+        const btn = ev.target.closest('.btn'); if (!btn) return;
+        const sel = viewer.getSelection();
+        const action = btn.dataset.action;
+
+        if (action === 'zoom') viewer.fitToView(sel);
+        if (action === 'isolate') viewer.isolate(sel);
+        if (action === 'clear') viewer.isolate([]);
+
+        hideSelectionMenu();
+        viewer.clearSelection();
+
+        clearTimeout(hideTimer);
+        hideTimer = setTimeout(hideSelectionMenu, 8000);
+      });
+
+      // Selection -> menu + actions
+      viewer.addEventListener(Autodesk.Viewing.SELECTION_CHANGED_EVENT, (e)=>{
+        const ids = e.dbIdArray || [];
+        if (!ids.length) { hideSelectionMenu(); return; }
+
+        const selectedDbId = Number(ids[0]);
+        viewer.getProperties(selectedDbId, async (props)=>{
+          const name = props?.name || ('dbId ' + selectedDbId);
+          showSelectionMenuAtDbId(selectedDbId, name);
+
+          deviceArea.innerHTML = '';
+
+          if (!DEVICE_DBIDS.has(selectedDbId)) {
+            // Non-device element: no actions, no telemetry
+            document.getElementById('telemetry').style.display = 'none';
+            const hint = document.createElement('div');
+            hint.className = 'muted';
+            hint.textContent = 'No actions for this element.';
+            deviceArea.appendChild(hint);
+            return;
+          }
+
+          // Try cached telemetry (if any), then refresh just this one
+          updateTelemetryUI(selectedDbId, latestStatus.get(selectedDbId));
+          try {
+            const data = await fetchStatus([selectedDbId], { timeoutMs: 6000 });
+            if (data?.ok && data.devices?.length) {
+              const row = data.devices[0];
+              latestStatus.set(selectedDbId, row);
+              if (row.device) {
+                const arr = deviceToDbIds.get(row.device) || [];
+                if (!arr.includes(selectedDbId)) { arr.push(selectedDbId); deviceToDbIds.set(row.device, arr); }
+              }
+              updateTelemetryUI(selectedDbId, row);
+              colorFromTelemetry(selectedDbId, row.relay, row.power_w);
+            }
+          } catch(e){ /* ignore */ }
+
+          // Action buttons (gated by password)
+          const label = document.createElement('div');
+          label.className = 'muted';
+          label.textContent = `Device dbId: ${selectedDbId}`;
+          deviceArea.appendChild(label);
+
+          const onBtn = document.createElement('button');
+          onBtn.className = 'btn';
+          onBtn.textContent = 'Turn ON';
+          onBtn.onclick  = () => requireAuthThen(async () => {
+            setMenuBusy(true);
+            try {
+              for (const id of getGroupDbIds(selectedDbId)) colorOn(id);   // optimistic group color
+              await postToggle(selectedDbId, 'on',  { timeoutMs: 15000 });
+              toast('Turned ON', 'ok');
+              refreshBurst();
+            } catch (e) {
+              for (const id of getGroupDbIds(selectedDbId)) {
+                const c = latestStatus.get(id);
+                if (c) colorFromTelemetry(id, c.relay, c.power_w); else colorOff(id);
+              }
+              console.error('ON failed:', e);
+              toast('Failed to turn ON — reverted', 'error');
+            } finally {
+              setMenuBusy(false);
+              hideSelectionMenu();
+              viewer.clearSelection();
+            }
+          });
+          deviceArea.appendChild(onBtn);
+
+          const offBtn = document.createElement('button');
+          offBtn.className = 'btn';
+          offBtn.textContent = 'Turn OFF';
+          offBtn.onclick = () => requireAuthThen(async () => {
+            setMenuBusy(true);
+            try {
+              for (const id of getGroupDbIds(selectedDbId)) colorOff(id);  // optimistic group color
+              await postToggle(selectedDbId, 'off', { timeoutMs: 15000 });
+              toast('Turned OFF', 'ok');
+              refreshBurst();
+            } catch (e) {
+              for (const id of getGroupDbIds(selectedDbId)) {
+                const c = latestStatus.get(id);
+                if (c) colorFromTelemetry(id, c.relay, c.power_w); else colorOn(id);
+              }
+              console.error('OFF failed:', e);
+              toast('Failed to turn OFF — reverted', 'error');
+            } finally {
+              setMenuBusy(false);
+              hideSelectionMenu();
+              viewer.clearSelection();
+            }
+          });
+          deviceArea.appendChild(offBtn);
+        });
+      });
+
+      // Keep the menu anchored while orbiting/panning
+      viewer.addEventListener(Autodesk.Viewing.CAMERA_CHANGE_EVENT, updateMenuPositionIfVisible);
+
+      // Hide on outside click, ESC, resize, and scroll
+      viewer.container.addEventListener('mousedown', (ev)=>{ if (!el.contains(ev.target)) hideSelectionMenu(); });
+      viewer.addEventListener(Autodesk.Viewing.ESCAPE_EVENT, hideSelectionMenu);
+      window.addEventListener('resize', hideSelectionMenu);
+      window.addEventListener('scroll', updateMenuPositionIfVisible, { passive:true });
+    }
   </script>
 </body>
 </html>

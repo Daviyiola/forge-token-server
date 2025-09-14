@@ -7,6 +7,8 @@ const upload = multer({ storage: multer.memoryStorage() });
 const app = express();
 app.use(express.static(path.join(__dirname, 'public')));
 
+require('dotenv').config();
+
 // === APS credentials pulled from .env ===
 const CLIENT_ID = process.env.APS_CLIENT_ID;
 const CLIENT_SECRET = process.env.APS_CLIENT_SECRET;
