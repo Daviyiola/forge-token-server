@@ -3,7 +3,7 @@
 // ==== CONFIG ====
 const FALLBACK_URN = 'urn:REPLACE_WITH_YOUR_URN';
 const DBIDS = {
-  plugs:   new Set([2244,2245,2226]),
+  plugs:   new Set([2232,2254,2249]),
   sensors: new Set([2350,2348]),
   lights:  new Set([2394, 2396, 2399, 2397, 2398, 2400])
 };
