@@ -1,18 +1,16 @@
-// lights_metrics.js — live "light_on" theming + inline selection info (no commands)
+// lights_metrics.js — live "light_on" theming + playback coloring + inline selection info
 
 const LIGHTS = (() => {
-  // --- CONFIG: device -> [dbIds] (1 sensor can drive multiple elements)
+  /* =========================
+   * Config (maps)
+   * ========================= */
+  // deviceId -> [dbIds]
   const DEVICE_TO_DBIDS = new Map([
-    ['dtn-e41358088304', [2394, 2396, 2399, 2397, 2398, 2400]],   // <-- example; add your real mappings here
-    // ['another-device', [DBID_A, DBID_B]],
+    ['dtn-e41358088304', [2394, 2396, 2399, 2397, 2398, 2400]],
+    // add more as needed
   ]);
-  const STALE_MS = 30_000;
 
-  // --- Colors
-  const COLOR_ON  = new THREE.Vector4(0.97, 0.88, 0.73, 1.0); // warm "on"
-  const COLOR_OFF = null; // we'll clear theming color to show default model look
-
-  // Build reverse index (dbId -> [deviceIds]) in case you need it later
+  // reverse index: dbId -> [deviceIds]
   const DBID_TO_DEVICES = new Map();
   for (const [dev, ids] of DEVICE_TO_DBIDS) {
     ids.forEach(dbId => {
@@ -22,33 +20,45 @@ const LIGHTS = (() => {
     });
   }
 
-  // --- state per device { on:boolean|null, ts_ms:number }
-  const latest = new Map();
+  const STALE_MS = 30_000;
 
-  // --- utils
+  /* =========================
+   * Colors
+   * ========================= */
+  const COLOR_ON  = new THREE.Vector4(0.97, 0.88, 0.73, 1.0); // warm "on"
+  const COLOR_OFF = null; // clear theming to default model look
+
+  /* =========================
+   * State
+   * ========================= */
+  // Live MQTT latest: device -> { on:boolean|null, ts_ms:number }
+  const live = new Map();
+
+  // Playback override (if active): device -> { on:boolean|null }
+  let playbackActive = false;
+  const playback = new Map();
+
+  /* =========================
+   * Utils
+   * ========================= */
   function toMs(x) {
-  const n = Number(x);
-  if (!Number.isFinite(n) || n <= 0) return Date.now();
-  // seconds → ms
-  const ms = (n < 1e10) ? n * 1000 : n;
-
-  // guardrails
-  const MIN_OK = Date.UTC(2010, 0, 1);        // Jan 1, 2010
-  const MAX_FUTURE = Date.now() + 7 * 864e5;  // 7 days ahead
-  if (ms < MIN_OK || ms > MAX_FUTURE) return Date.now();
-  return ms;
-}
-
+    const n = Number(x);
+    if (!Number.isFinite(n) || n <= 0) return Date.now();
+    const ms = (n < 1e10) ? n * 1000 : n;
+    const MIN_OK = Date.UTC(2010, 0, 1);
+    const MAX_FUTURE = Date.now() + 7 * 864e5;
+    if (ms < MIN_OK || ms > MAX_FUTURE) return Date.now();
+    return ms;
+  }
   function secsAgo(ms) { return Math.max(0, Math.floor((Date.now() - ms) / 1000)); }
 
-  // Theming helpers
   function getV() { return (typeof window.getViewer === 'function') ? window.getViewer() : null; }
   function setColor(dbId, vec4) {
     const v = getV(); if (!v || !v.model) return;
     if (vec4 === null) {
       if (typeof v.clearThemingColor === 'function') v.clearThemingColor(dbId);
       else if (v.model?.clearThemingColor) v.model.clearThemingColor(dbId);
-      else { /* fallback: set a very mild neutral */ v.setThemingColor?.(dbId, new THREE.Vector4(0.55,0.55,0.55,0.0001), v.model, true); }
+      else v.setThemingColor?.(dbId, new THREE.Vector4(0.55,0.55,0.55,0.0001), v.model, true);
     } else {
       if (v.setThemingColor) v.setThemingColor(dbId, vec4, v.model, true);
       else v.model?.setThemingColor?.(dbId, vec4, true);
@@ -56,28 +66,50 @@ const LIGHTS = (() => {
     v.impl.sceneUpdated(true);
   }
 
-  // Paint all mapped dbIds from latest device states
+  /* =========================
+   * Painting (chooses playback if active)
+   * ========================= */
+  function isOnForDevice(dev) {
+    if (playbackActive) {
+      const p = playback.get(dev);
+      if (p) return !!p.on;
+      // if no snapshot for this dev, treat as OFF
+      return false;
+    }
+    const row = live.get(dev);
+    return row?.on === true;
+  }
+
   function paintAll() {
     for (const [dev, ids] of DEVICE_TO_DBIDS) {
-      const row = latest.get(dev);
-      const on = row?.on === true;
+      const on = isOnForDevice(dev);
       ids.forEach(dbId => setColor(dbId, on ? COLOR_ON : COLOR_OFF));
     }
   }
 
-  // Inline selection strip: “● ON • 3s”
+  /* =========================
+   * UI: inline selection info chip
+   * ========================= */
   function renderSelectionInfo(container, dbId) {
     const devices = DBID_TO_DEVICES.get(dbId) || [];
     const refresh = () => {
-      // If multiple devices map to one dbId (rare here), consider ON if any is on
       let on = false, newest = 0, stale = true;
-      devices.forEach(d => {
-        const row = latest.get(d);
-        if (!row) return;
-        if (row.on === true) on = true;
-        newest = Math.max(newest, row.ts_ms || 0);
-      });
-      if (newest) stale = (Date.now() - newest) > STALE_MS;
+
+      if (playbackActive) {
+        // If multiple devices map to this dbId, ON if any is on in the snapshot
+        on = devices.some(d => playback.get(d)?.on === true);
+        // No meaningful “age” in playback; show pause/playing via your dock instead
+        newest = Date.now();
+        stale = false;
+      } else {
+        devices.forEach(d => {
+          const row = live.get(d);
+          if (!row) return;
+          if (row.on === true) on = true;
+          newest = Math.max(newest, row.ts_ms || 0);
+        });
+        if (newest) stale = (Date.now() - newest) > STALE_MS;
+      }
 
       const dot = document.createElement('span');
       dot.style.cssText = `
@@ -93,14 +125,14 @@ const LIGHTS = (() => {
         return s;
       };
 
-      const ageTxt = newest ? `${secsAgo(newest)}s` : '—';
+      const ageTxt = playbackActive ? 'playback' : (newest ? `${secsAgo(newest)}s` : '—');
 
       container.innerHTML = '';
       container.style.cssText = 'display:flex;gap:8px;align-items:center;margin:6px 0 2px;';
       container.appendChild(dot);
       container.appendChild(pill(on ? 'ON' : 'OFF'));
       const age = pill(ageTxt);
-      if (stale) age.style.borderColor = '#705d1a', age.style.color = '#f5c542';
+      if (!playbackActive && stale) { age.style.borderColor = '#705d1a'; age.style.color = '#f5c542'; }
       container.appendChild(age);
     };
 
@@ -112,7 +144,39 @@ const LIGHTS = (() => {
     obs.observe(document.body, { childList: true, subtree: true });
   }
 
-  // MQTT
+  /* =========================
+   * Playback bridge
+   * ========================= */
+  // Update the per-device playback state from a frame
+  function applyPlaybackFrame(snap) {
+    // snap.lights is { deviceId: { light_on_num: 0|1|null } }
+    playback.clear();
+    if (snap && snap.lights) {
+      for (const [dev, obj] of Object.entries(snap.lights)) {
+        const v = (obj?.light_on_num);
+        playback.set(dev, { on: v != null && Number(v) > 0.5 });
+      }
+    }
+  }
+
+  window.addEventListener('playback:tick', (ev) => {
+    if (!playbackActive) return;
+    applyPlaybackFrame(ev.detail?.snapshot || {});
+    paintAll();
+  });
+
+  window.addEventListener('playback:state', (ev) => {
+    const d = ev.detail || {};
+    // prefer snapshots whenever playback “ready” (a range is loaded)
+    playbackActive = !!d.ready;
+    if (!playbackActive) playback.clear();
+    // repaint immediately (switching modes)
+    paintAll();
+  });
+
+  /* =========================
+   * Live MQTT wiring
+   * ========================= */
   function ensureMqttClient() {
     if (window.MQTT_CLIENT) return Promise.resolve(window.MQTT_CLIENT);
     return fetch('/api/mqtt/config').then(r => r.json()).then(cfg => {
@@ -145,6 +209,7 @@ const LIGHTS = (() => {
     }));
 
     client.on('message', (topic, payload) => {
+      // Ignore live updates if we’re in playback mode, but still keep “live” fresh in the background
       const m = topic.match(/^dt\/dt-lab\/([^/]+)\/telemetry$/);
       if (!m) return;
       const dev = m[1];
@@ -153,21 +218,26 @@ const LIGHTS = (() => {
       if (!obj || typeof obj.light_on === 'undefined') return;
       const on = (obj.light_on === true || String(obj.light_on).toLowerCase() === 'true');
       const ts = toMs(obj.ts_ms ?? obj.ts ?? Date.now());
-      latest.set(dev, { on, ts_ms: ts });
-      paintAll();
+      live.set(dev, { on, ts_ms: ts });
+      if (!playbackActive) paintAll();
     });
 
-    // staleness repaint
-    setInterval(paintAll, 5000);
+    // periodic repaint to catch staleness
+    setInterval(() => { if (!playbackActive) paintAll(); }, 5000);
   }
 
-  // boot
   ensureMqttClient().then(subscribeDevices).then(() => paintAll());
 
-  // public api
-  // public api
-  const api = { renderSelectionInfo, DEVICE_TO_DBIDS};
+  /* =========================
+   * Public API
+   * ========================= */
+  const api = {
+    renderSelectionInfo,
+    DEVICE_TO_DBIDS,  // used by day_playback_ui to list lights
+    DBID_TO_DEVICES,  // handy for selection info, etc.
+  };
   window.LIGHTS = api;
   return api;
 })();
+
 export default window.LIGHTS;

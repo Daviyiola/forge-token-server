@@ -1,7 +1,9 @@
-// plug_metrics.js — live plug telemetry (power + relay) + viewer theming + menu info
+// plug_metrics.js — live plug telemetry (power + relay) + playback coloring + viewer theming
 
 const PLUGS = (() => {
-  // ---- CONFIG ----
+  /* =========================
+   * Config (maps)
+   * ========================= */
   // dbId -> [deviceIds]; supports multiple devices per dbId (sum watts, toggle all)
   const DBID_TO_DEVICES = new Map([
     [2244, ['dtn-12e7df', 'dtn-12b2e2']],
@@ -9,19 +11,8 @@ const PLUGS = (() => {
     [2226, ['dtn-127dd3', 'dtn-12717a']],
     // add more as needed
   ]);
-  const STALE_MS = 30_000;
 
-  // --- Colors (Vector4 for theming)
-  const COLOR_GRAY   = new THREE.Vector4(0.55, 0.55, 0.55, 1.0);
-  const COLOR_YELLOW = new THREE.Vector4(0.96, 0.80, 0.28, 1.0);
-  const COLOR_GREEN  = new THREE.Vector4(0.35, 0.78, 0.45, 1.0);
-
-  // topic helpers
-  const topicPower = dev => `dt/dt-lab/${dev}/sensor/power/state`;
-  const topicRelay = dev => `dt/dt-lab/${dev}/switch/relay/state`;
-  const cmdRelay   = dev => `${dev}/switch/relay/command`; // publish (no dt/dt-lab prefix)
-
-  // reverse index: device -> [dbIds]
+  // reverse index: deviceId -> [dbIds]
   const DEVICE_TO_DBIDS = new Map();
   for (const [dbId, devs] of DBID_TO_DEVICES) {
     devs.forEach(d => {
@@ -31,23 +22,20 @@ const PLUGS = (() => {
     });
   }
 
-  // ---- State: latest sample per device ----
-  // { watts:number|null, relay:'ON'|'OFF'|null, ts_ms:number }
-  const latest = new Map();
+  const STALE_MS = 30_000;
 
-  // ---- Utils ----
-  function toMs(x) {
-    const n = Number(x);
-    if (!Number.isFinite(n) || n <= 0) return Date.now();
-    if (n < 1e10) return n * 1000;   // seconds -> ms
-    if (n > 1e15) return Date.now(); // garbage protection
-    return n;
+  /* =========================
+   * Colors / Viewer helpers
+   * ========================= */
+  const COLOR_GRAY   = new THREE.Vector4(0.55, 0.55, 0.55, 1.0);
+  const COLOR_YELLOW = new THREE.Vector4(0.96, 0.80, 0.28, 1.0);
+  const COLOR_GREEN  = new THREE.Vector4(0.35, 0.78, 0.45, 1.0);
+
+  function getViewer() {
+    return (typeof window.getViewer === 'function') ? window.getViewer() : null;
   }
-  function secsAgo(ms) { return Math.max(0, Math.floor((Date.now() - ms) / 1000)); }
-
-  // Theming
   function setColor(dbId, vec4) {
-    const v = (typeof window.getViewer === 'function') ? window.getViewer() : null;
+    const v = getViewer();
     if (!v || !v.model) return;
     if (v.setThemingColor) v.setThemingColor(dbId, vec4, v.model, true);
     else if (v.model.setThemingColor) v.model.setThemingColor(dbId, vec4, true);
@@ -59,7 +47,18 @@ const PLUGS = (() => {
     return COLOR_GREEN;
   }
 
-  // Compute merged watts & freshness for a dbId (summing all devices mapped)
+  /* =========================
+   * Live state (MQTT)
+   * ========================= */
+  // latest per device: { watts:number|null, relay:'ON'|'OFF'|null, ts_ms:number }
+  const latest = new Map();
+
+  const topicPower = dev => `dt/dt-lab/${dev}/sensor/power/state`;
+  const topicRelay = dev => `dt/dt-lab/${dev}/switch/relay/state`;
+  const cmdRelay   = dev => `${dev}/switch/relay/command`; // broker expects this bare topic
+
+  function secsAgo(ms) { return Math.max(0, Math.floor((Date.now() - ms) / 1000)); }
+
   function mergedForDbId(dbId) {
     const devs = DBID_TO_DEVICES.get(dbId) || [];
     let sumW = 0, any = false, newest = 0, anyRelay = null;
@@ -79,68 +78,145 @@ const PLUGS = (() => {
     };
   }
 
-  // Apply colors to every mapped dbId continuously
-  function paintAll() {
+  function paintAllLive() {
     for (const dbId of DBID_TO_DEVICES.keys()) {
       const { watts } = mergedForDbId(dbId);
       setColor(dbId, colorFromWatts(watts));
     }
   }
 
-  // ---- Selection menu renderer (called by viewer.js) ----
-function renderSelectionInfo(container, dbId) {
-  const refresh = () => {
-    const { watts, ts_ms, stale, relay } = mergedForDbId(dbId);
+  /* =========================
+   * Playback bridge
+   * ========================= */
+  let playbackMode = false;   // prefer snapshots when true
+  let lastPB = null;          // last playback snapshot
+  let pbGuard = null;         // timeout to fall back to live
 
-    const wTxt = (typeof watts === 'number')
-      ? `${watts.toFixed(1)} W`   // e.g. "14.0 W"
-      : '—';
-    const rTxt = relay ?? '—';
-    const age  = ts_ms ? `${secsAgo(ts_ms)}s` : '—';
+  function enterPlaybackMode() {
+    playbackMode = true;
+    if (pbGuard) clearTimeout(pbGuard);
+    // If no more ticks in 3s, drop back to live
+    pbGuard = setTimeout(() => { playbackMode = false; lastPB = null; paintAllLive(); }, 3000);
+  }
 
-    // color dot from watts thresholds
-    const dotColor = (watts == null || watts < 1) ? '#8b8b8b' : (watts <= 20 ? '#f5c542' : '#27b065');
+  function paintFromSnapshot(snapshot) {
+    if (!snapshot || !snapshot.plugs) return;
+    for (const [dbId, devs] of DBID_TO_DEVICES) {
+      let sumW = 0, any = false;
+      for (const dev of devs) {
+        const row = snapshot.plugs[dev];
+        if (row && typeof row.watts === 'number') {
+          sumW += row.watts;
+          any = true;
+        }
+      }
+      const watts = any ? sumW : null;
+      setColor(dbId, colorFromWatts(watts));
+    }
+  }
 
-    container.innerHTML = `
-      <span style="width:8px;height:8px;border-radius:999px;display:inline-block;background:${dotColor};
-                   box-shadow: inset 0 0 0 2px rgba(255,255,255,.08);"></span>
-      <span style="font:700 12px/1 system-ui,sans-serif;padding:4px 8px;border-radius:10px;background:#1a1a1a;border:1px solid #2a2a2a;">${wTxt}</span>
-      <span style="font:700 12px/1 system-ui,sans-serif;padding:4px 8px;border-radius:10px;background:#1a1a1a;border:1px solid #2a2a2a;">${rTxt}</span>
-      <span style="font:700 12px/1 system-ui,sans-serif;padding:4px 8px;border-radius:10px;background:#1a1a1a;border:1px solid ${stale ? '#705d1a' : '#2a2a2a'};color:${stale ? '#f5c542' : 'inherit'};">${age}</span>
-    `;
-  };
+  function paintSmart() {
+    if (playbackMode && lastPB) paintFromSnapshot(lastPB);
+    else paintAllLive();
+  }
 
-  container.style.cssText = 'display:flex;gap:8px;align-items:center;margin:6px 0 2px;';
-  refresh();
-  const t = setInterval(refresh, 1000);
-  const obs = new MutationObserver(() => {
-    if (!document.body.contains(container)) { clearInterval(t); obs.disconnect(); }
+  // Listen for day-playback events
+  window.addEventListener('playback:tick', (ev) => {
+    lastPB = ev?.detail?.snapshot || null;
+    enterPlaybackMode();
+    paintSmart();
   });
-  obs.observe(document.body, { childList: true, subtree: true });
-}
 
+  window.addEventListener('playback:state', (ev) => {
+    const d = ev?.detail || {};
+    // If playback not ready or ended, revert to live
+    if (!d.ready || (!d.playing && d.idx >= (d.total - 1))) {
+      playbackMode = false;
+      lastPB = null;
+      paintAllLive();
+    }
+  });
 
+  /* =========================
+   * Selection info strip (viewer menu)
+   * ========================= */
+  function renderSelectionInfo(container, dbId) {
+    const refresh = () => {
+      // Prefer snapshot display if in playback mode
+      if (playbackMode && lastPB) {
+        const devs = DBID_TO_DEVICES.get(dbId) || [];
+        let sumW = 0, any = false;
+        devs.forEach(dev => {
+          const row = lastPB.plugs?.[dev];
+          if (row && typeof row.watts === 'number') { sumW += row.watts; any = true; }
+        });
+        const watts = any ? sumW : null;
+        const dotColor = (watts == null || watts < 1) ? '#8b8b8b' : (watts <= 20 ? '#f5c542' : '#27b065');
+        container.innerHTML = `
+          <span style="width:8px;height:8px;border-radius:999px;display:inline-block;background:${dotColor};
+                       box-shadow: inset 0 0 0 2px rgba(255,255,255,.08);"></span>
+          <span style="font:700 12px/1 system-ui,sans-serif;padding:4px 8px;border-radius:10px;background:#1a1a1a;border:1px solid #2a2a2a;">
+            ${typeof watts === 'number' ? watts.toFixed(1)+' W' : '—'}
+          </span>
+          <span style="font:700 12px/1 system-ui,sans-serif;padding:4px 8px;border-radius:10px;background:#1a1a1a;border:1px solid #2a2a2a;">
+            Playback
+          </span>
+        `;
+        return;
+      }
 
-  // ---- Commands (no auth gate yet) ----
+      // Live
+      const { watts, ts_ms, stale, relay } = mergedForDbId(dbId);
+      const dotColor = (watts == null || watts < 1) ? '#8b8b8b' : (watts <= 20 ? '#f5c542' : '#27b065');
+      const age  = ts_ms ? `${secsAgo(ts_ms)}s` : '—';
+      container.innerHTML = `
+        <span style="width:8px;height:8px;border-radius:999px;display:inline-block;background:${dotColor};
+                     box-shadow: inset 0 0 0 2px rgba(255,255,255,.08);"></span>
+        <span style="font:700 12px/1 system-ui,sans-serif;padding:4px 8px;border-radius:10px;background:#1a1a1a;border:1px solid #2a2a2a;">
+          ${typeof watts === 'number' ? watts.toFixed(1)+' W' : '—'}
+        </span>
+        <span style="font:700 12px/1 system-ui,sans-serif;padding:4px 8px;border-radius:10px;background:#1a1a1a;border:1px solid #2a2a2a;">
+          ${relay ?? '—'}
+        </span>
+        <span style="font:700 12px/1 system-ui,sans-serif;padding:4px 8px;border-radius:10px;background:#1a1a1a;
+                     border:1px solid ${stale ? '#705d1a' : '#2a2a2a'};color:${stale ? '#f5c542' : 'inherit'};">
+          ${age}
+        </span>
+      `;
+    };
+
+    container.style.cssText = 'display:flex;gap:8px;align-items:center;margin:6px 0 2px;';
+    refresh();
+    const t = setInterval(refresh, 1000);
+    const obs = new MutationObserver(() => {
+      if (!document.body.contains(container)) { clearInterval(t); obs.disconnect(); }
+    });
+    obs.observe(document.body, { childList: true, subtree: true });
+  }
+
+  /* =========================
+   * Commands
+   * ========================= */
   function publish(dev, value) {
     if (!window.MQTT_CLIENT) return console.warn('[PLUGS] no MQTT client to publish');
     window.MQTT_CLIENT.publish(cmdRelay(dev), value, { qos: 1 }, (e) => {
       if (e) console.warn('[PLUGS] publish error', e);
     });
   }
+
   function toggleRelay(dbId, on) {
-  const doPublish = () => {
-    const devs = DBID_TO_DEVICES.get(dbId) || [];
-    devs.forEach(dev => publish(dev, on ? 'ON' : 'OFF'));
-    window.AppToast?.(`Sent ${on ? 'ON' : 'OFF'}`, 'ok');
-  };
-  if (window.AppAuth?.requireAuthThen) return window.AppAuth.requireAuthThen(doPublish);
-  // fallback (if auth not loaded)
-  doPublish();
-}
+    const doPublish = () => {
+      const devs = DBID_TO_DEVICES.get(dbId) || [];
+      devs.forEach(dev => publish(dev, on ? 'ON' : 'OFF'));
+      window.AppToast?.(`Sent ${on ? 'ON' : 'OFF'}`, 'ok');
+    };
+    if (window.AppAuth?.requireAuthThen) return window.AppAuth.requireAuthThen(doPublish);
+    doPublish();
+  }
 
-
-  // ---- MQTT wiring ----
+  /* =========================
+   * MQTT wiring
+   * ========================= */
   function ensureMqttClient() {
     if (window.MQTT_CLIENT) return Promise.resolve(window.MQTT_CLIENT);
     return fetch('/api/mqtt/config')
@@ -148,7 +224,7 @@ function renderSelectionInfo(container, dbId) {
       .then(cfg => {
         if (!cfg?.ok) throw new Error('Bad mqtt config');
         let { url, username, password } = cfg;
-        // normalize to WSS
+        // normalize mqtt[s]:// to wss://
         try {
           const u = new URL(url);
           if (u.protocol === 'mqtt:' || u.protocol === 'mqtts:') {
@@ -167,64 +243,60 @@ function renderSelectionInfo(container, dbId) {
           protocolVersion: 4, reconnectPeriod: 4000
         });
         window.MQTT_CLIENT = client;
-        return new Promise(resolve => {
-          client.on('connect', () => resolve(client));
-        });
+        return new Promise(resolve => client.on('connect', () => resolve(client)));
       });
   }
 
   function subscribeDevices(client) {
-    // subscribe once per device for power+relay
+    // Subscribe per device for power + relay
     const subs = [];
-    for (const dev of DEVICE_TO_DBIDS.keys()) {
-      subs.push(topicPower(dev), topicRelay(dev));
-    }
+    for (const dev of DEVICE_TO_DBIDS.keys()) subs.push(topicPower(dev), topicRelay(dev));
     subs.forEach(tp => client.subscribe(tp, { qos: 1 }, (err) => {
       if (err) console.warn('[PLUGS] subscribe error', tp, err);
     }));
 
     client.on('message', (topic, payload) => {
-      // match power
       const mPower = topic.match(/^dt\/dt-lab\/([^/]+)\/sensor\/power\/state$/);
       const mRelay = topic.match(/^dt\/dt-lab\/([^/]+)\/switch\/relay\/state$/);
       if (!mPower && !mRelay) return;
-      const dev = (mPower || mRelay)[1];
 
+      const dev = (mPower || mRelay)[1];
+      const now = Date.now();
       let row = latest.get(dev) || { watts: null, relay: null, ts_ms: 0 };
+
       if (mPower) {
         const w = Number(payload.toString());
         if (Number.isFinite(w)) row.watts = w;
-        row.ts_ms = Date.now();
+        row.ts_ms = now;
       } else if (mRelay) {
         const s = String(payload.toString()).trim().toUpperCase();
         row.relay = (s === 'ON' || s === 'OFF') ? s : row.relay;
-        row.ts_ms = Date.now();
+        row.ts_ms = now;
       }
-      latest.set(dev, row);
 
-      // repaint all mapped dbIds when any plug message arrives
-      paintAll();
+      latest.set(dev, row);
+      paintSmart();
     });
 
-    // staleness repaint
-    setInterval(paintAll, 5_000);
+    // Periodic repaint for staleness / idle state
+    setInterval(paintSmart, 5_000);
   }
 
-  // boot
-  ensureMqttClient().then(subscribeDevices).then(() => {
-    // initial paint (gray until data)
-    paintAll();
-  });
+  // Boot
+  ensureMqttClient().then(subscribeDevices).then(() => paintSmart());
 
-  // public API
-    // public API
+  /* =========================
+   * Public API
+   * ========================= */
   const api = {
     renderSelectionInfo,
     toggleRelay,
-    DBID_TO_DEVICES,   // <— expose your map here
-    DEVICE_TO_DBIDS    // (handy if needed elsewhere)
+    DBID_TO_DEVICES,
+    DEVICE_TO_DBIDS
   };
-  window.PLUGS = api;  // also attach to window here
+
+  window.PLUGS = api;
   return api;
 })();
+
 export default window.PLUGS;
