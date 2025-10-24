@@ -3,7 +3,7 @@
 // ==== CONFIG ====
 const FALLBACK_URN = 'urn:REPLACE_WITH_YOUR_URN';
 const DBIDS = {
-  plugs:   new Set([2232,2254,2249]),
+  plugs:   new Set([2263, 2264, 2185, 2249, 2231, 2232, 2214, 2193, 2254, 2237, 2218, 2219, 2267]),
   sensors: new Set([2350,2348]),
   lights:  new Set([2394, 2396, 2399, 2397, 2398, 2400])
 };
@@ -108,10 +108,16 @@ function bootViewer(containerOrId = 'viewer') {
 }
 
 // ==== SELECTION MENU ====
+
+function hasRoomMapping(dbId) {
+  try { return !!window.METRICS?.getRoomByDbId?.(dbId); } catch { return false; }
+}
+
 function categoryForDbId(dbId) {
-  if (DBIDS.plugs.has(dbId)) return 'plug';
+  if (hasRoomMapping(dbId)) return 'room';      // NEW: treat mapped items as "room"
+  if (DBIDS.plugs.has(dbId))   return 'plug';
   if (DBIDS.sensors.has(dbId)) return 'sensor';
-  if (DBIDS.lights.has(dbId)) return 'light';
+  if (DBIDS.lights.has(dbId))  return 'light';
   return null;
 }
 
@@ -219,7 +225,20 @@ function showSelectionMenuAt(dbId, title, category) {
   btns.appendChild(viewBtn);
 }
 
-  
+  // Add after sensor button block (or anywhere suitable in the button build)
+if (window.METRICS?.getRoomByDbId?.(dbId)) {
+  const roomBtn = document.createElement('button');
+  roomBtn.className = 'btn';
+  roomBtn.textContent = 'Set as Primary Room';
+  roomBtn.onclick = () => {
+    const ok = window.METRICS?.setPrimaryRoomByDbId?.(dbId);
+    hideSelectionMenu();
+    if (ok) toast(`dbId ${dbId} set as primary room`, 'ok');
+    else    toast(`No room mapping for dbId ${dbId}`, 'error');
+  };
+  btns.appendChild(roomBtn);
+}
+
 
 if (category === 'plug') {
   // Inline metrics row FIRST

@@ -6,9 +6,19 @@ const PLUGS = (() => {
    * ========================= */
   // dbId -> [deviceIds]; supports multiple devices per dbId (sum watts, toggle all)
   const DBID_TO_DEVICES = new Map([
-    [2232, ['dtn-12e7df', 'dtn-12b2e2']],
-    [2254, ['dtn-aa5abc', 'dtn-12a08e']],
-    [2249, ['dtn-127dd3', 'dtn-12717a']],
+    [2263, ['dtn-1244ef']],
+    [2264, ['dtn-127bed']],
+    [2185, ['dtn-12ff32']],
+    [2249, ['dtn-1271c6']],
+    [2231, ['dtn-aa4802']],
+    [2232, ['dtn-aa641b']],
+    [2214, ['dtn-12fa99']],
+    [2193, ['dtn-aa5abc']],
+    [2254, ['dtn-12b2e2']],
+    [2237, ['dtn-12e7df']],
+    [2218, ['dtn-127dd3']],
+    [2219, ['dtn-12717a']],
+    [2267, ['dtn-12a08e']],
     // add more as needed
   ]);
 

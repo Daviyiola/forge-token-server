@@ -1,4 +1,4 @@
-// app_metrics.js — live metrics dock + MQTT + primary sensor mapping + Day Playback integration
+// app_metrics.js — live metrics dock + MQTT + primary sensor + primary room + Day Playback integration
 
 const METRICS = (() => {
   /* ---------- DOM ---------- */
@@ -17,6 +17,52 @@ const METRICS = (() => {
     occVal:  document.getElementById('mOccVal'),
     occDot:  document.getElementById('mOccDot'),
   };
+
+  /* ---------- Live occupancy (room) ---------- */
+  // Stores: roomName -> { count:number, ts:number(ms) }
+  const latestOccByRoom = new Map();
+
+  // LocalStorage key + default primary room (yours)
+  const KEY_PRIMARY_ROOM = 'primary_room_name';
+  const DEFAULT_PRIMARY_ROOM = 'WWH015';
+
+  // Optional mapping from dbId -> room name (fill as needed)
+  // If you later want to set primary room from a model selection, populate this.
+  const DBID_TO_ROOM = new Map([
+    [2348, 'WWH015'],
+    // [2396, 'WWH016'],
+  ]);
+
+  // Consider occupancy "stale" after 6 hours with no message
+  const OCC_CLEAR_AFTER_MS = 6 * 60 * 60 * 1000; // 6h
+
+  let primaryRoomName = null;
+  try {
+    primaryRoomName = localStorage.getItem(KEY_PRIMARY_ROOM) || DEFAULT_PRIMARY_ROOM;
+  } catch {
+    primaryRoomName = DEFAULT_PRIMARY_ROOM;
+  }
+
+  function getRoomByDbId(dbId) {
+    return DBID_TO_ROOM.get(Number(dbId)) || null;
+  }
+  function setPrimaryRoomByDbId(dbId) {
+    const room = getRoomByDbId(dbId);
+    if (!room) { console.warn('No room mapping for dbId', dbId); return false; }
+    primaryRoomName = room;
+    try { localStorage.setItem(KEY_PRIMARY_ROOM, room); } catch {}
+    setUpdatedFromMs(Date.now());
+    renderDock();
+    return true;
+  }
+  function setPrimaryRoomByName(room) {
+    if (!room || typeof room !== 'string') return false;
+    primaryRoomName = room;
+    try { localStorage.setItem(KEY_PRIMARY_ROOM, room); } catch {}
+    setUpdatedFromMs(Date.now());
+    renderDock();
+    return true;
+  }
 
   /* ---------- UI helpers ---------- */
   function setValDot(valEl, dotEl, text, cls = '') {
@@ -51,13 +97,18 @@ const METRICS = (() => {
     el.updated.textContent = label;
   }
 
+  function formatPeople(n) {
+  if (n == null || !Number.isFinite(n)) return '—';
+  return `${n} ${n === 1 ? 'person' : 'people'}`;
+}
+
   /* ---------- Thresholds & classify ---------- */
   const THRESHOLDS = {
     temp_f:   { cool: 0,     good: [68, 77], warn: [77, 82],  bad: [82,  999] },
     rh_pct:   {              good: [30, 60], warn: [60, 70],  bad: [70,  999] },
     tvoc_ppb: {              good: [0,  400], warn: [400,1000], bad:[1000,99999] },
     eco2_ppm: {              good: [400,1000], warn:[1000,2000], bad:[2000,99999] },
-    occ:      {              good: [0,    5], warn: [6,   10],  bad:[11,  999] },
+    occ:      {              good: [0,    15], warn: [16,   30],  bad:[31,  999] },
   };
 
   function classify(metric, val) {
@@ -79,24 +130,19 @@ const METRICS = (() => {
     });
   }
 
-  /* ---------- dbId <-> device mapping ---------- */
+  /* ---------- dbId <-> sensor device mapping ---------- */
   const DBID_TO_DEVICE = new Map([
-    [2350, 'dtn-e41358088304'],
-    [2348, 'dtn-3c2b5540c86c'],
+    [2350, 'dtn-e41358088304'],    
     // add more: [dbid, 'device-id'],
   ]);
-
-  // after: const DBID_TO_DEVICE = new Map([...]);
-window.METRICS = Object.assign(window.METRICS || {}, {
-  DBID_TO_DEVICE,
-  setPrimaryByDbId
-});
-
 
   const DEFAULT_PRIMARY_DBID = 2350;
 
   let primaryDeviceId = null;
-  try { const cached = localStorage.getItem('primary_sensor_device'); if (cached) primaryDeviceId = cached; } catch {}
+  try {
+    const cached = localStorage.getItem('primary_sensor_device');
+    if (cached) primaryDeviceId = cached;
+  } catch {}
   if (!primaryDeviceId) {
     const def = DBID_TO_DEVICE.get(DEFAULT_PRIMARY_DBID);
     if (def) {
@@ -108,7 +154,6 @@ window.METRICS = Object.assign(window.METRICS || {}, {
   function getDeviceByDbId(dbId) {
     return DBID_TO_DEVICE.get(Number(dbId)) || null;
   }
-
   function setPrimaryByDbId(dbId) {
     const dev = getDeviceByDbId(dbId);
     if (!dev) { console.warn('No device mapping for dbId', dbId); return false; }
@@ -119,12 +164,9 @@ window.METRICS = Object.assign(window.METRICS || {}, {
     return true;
   }
 
-  // Expose for other modules (day playback, etc.)
-  window.METRICS = { setPrimaryByDbId, getDeviceByDbId, DBID_TO_DEVICE };
-
   /* ---------- Live state + MQTT ---------- */
   let client = null;
-  const latestByDevice = new Map();
+  const latestByDevice = new Map(); // deviceId -> env metrics
 
   function extractMetrics(payloadObj) {
     return {
@@ -132,8 +174,19 @@ window.METRICS = Object.assign(window.METRICS || {}, {
       rh_pct:   (payloadObj.rh_pct   != null) ? Number(payloadObj.rh_pct)   : null,
       tvoc_ppb: (payloadObj.tvoc_ppb != null) ? Number(payloadObj.tvoc_ppb) : null,
       eco2_ppm: (payloadObj.eco2_ppm != null) ? Number(payloadObj.eco2_ppm) : null,
-      // occ stays optional/placeholder
+      // occ remains optional for sensor snapshots
     };
+  }
+
+  function nowMs() { return Date.now(); }
+
+  function currentOccupancyForPrimaryRoom() {
+    if (!primaryRoomName) return { val: null, ts: null };
+    const row = latestOccByRoom.get(primaryRoomName);
+    if (!row) return { val: null, ts: null };
+    const age = nowMs() - (row.ts || 0);
+    if (age > OCC_CLEAR_AFTER_MS) return { val: null, ts: row.ts }; // stale → clear to "—"
+    return { val: (typeof row.count === 'number' ? row.count : null), ts: row.ts };
   }
 
   function renderDock() {
@@ -144,13 +197,17 @@ window.METRICS = Object.assign(window.METRICS || {}, {
     const rh  = (s && typeof s.rh_pct   === 'number') ? s.rh_pct   : null;
     const tv  = (s && typeof s.tvoc_ppb === 'number') ? s.tvoc_ppb : null;
     const c2  = (s && typeof s.eco2_ppm === 'number') ? s.eco2_ppm : null;
-    const occ = (s && typeof s.occ      === 'number') ? s.occ      : null;
+
+    // Occupancy: prefer live room stream; fallback to sensor occ if present
+    const occLive = currentOccupancyForPrimaryRoom();
+    let occVal = occLive.val;
+    if (occVal == null && s && typeof s.occ === 'number') occVal = s.occ;
 
     setValDot(el.tempVal, el.tempDot, t  != null ? `${t.toFixed(1)} °F` : '—', classify('temp_f',  t));
     setValDot(el.humVal,  el.humDot,  rh != null ? `${rh.toFixed(1)} %` : '—', classify('rh_pct',  rh));
     setValDot(el.tvocVal, el.tvocDot, tv != null ? `${Math.round(tv)} ppb` : '—', classify('tvoc_ppb', tv));
     setValDot(el.eco2Val, el.eco2Dot, c2 != null ? `${Math.round(c2)} ppm` : '—', classify('eco2_ppm', c2));
-    setValDot(el.occVal,  el.occDot,  occ!= null ? String(occ) : '—',        classify('occ',     occ));
+    setValDot(el.occVal, el.occDot, formatPeople(occVal), classify('occ', occVal));
   }
 
   function scheduleRender(tsMs = null) {
@@ -185,19 +242,51 @@ window.METRICS = Object.assign(window.METRICS || {}, {
       protocolVersion: 4, reconnectPeriod: 4000
     });
 
+    // make available to other modules if not already
+    if (!window.MQTT_CLIENT) window.MQTT_CLIENT = client;
+
     client.on('connect', () => {
+      // Existing topics (sensor JSON, etc.)
       topics.forEach(tp => client.subscribe(tp, { qos: 1 }, (err) => {
         if (err) console.warn('Subscribe error', tp, err);
       }));
+
+      // Direct, near real-time room occupancy counts
+      client.subscribe('dt/dt-lab/+/count', { qos: 1 }, (err) => {
+        if (err) console.warn('Subscribe error dt/dt-lab/+/count', err);
+      });
     });
 
     client.on('message', (topic, payload) => {
-      // While day playback is active, suppress live paints
-      if (window.__PLAYBACK_ACTIVE) return;
+      const isCountTopic = /\/count$/.test(topic);
 
+      // During playback, prefer snapshots, so ignore *live* paints
+      if (!isCountTopic && window.__PLAYBACK_ACTIVE) return;
+      if (isCountTopic && window.__PLAYBACK_ACTIVE) return;
+
+      if (isCountTopic) {
+        // Payload sample: {"room":"WWH015","count":1,"event":"entry","t":1761108665636}
+        let obj = null;
+        try { obj = JSON.parse(payload.toString()); } catch {}
+        if (!obj || typeof obj.room !== 'string') return;
+
+        const room = obj.room;
+        const n = Number(obj.count);
+        const ts = toMs(obj.t ?? Date.now());
+        if (!Number.isFinite(n)) return;
+
+        latestOccByRoom.set(room, { count: n, ts });
+
+        if (room === primaryRoomName) {
+          renderDock();
+          setUpdatedFromMs(ts);
+        }
+        return;
+      }
+
+      // Sensor telemetry (JSON)
       const dev = deviceFromTopic(topic);
       if (!dev) return;
-
       let obj = null;
       try { obj = JSON.parse(payload.toString()); } catch {}
       if (!obj) return;
@@ -217,11 +306,17 @@ window.METRICS = Object.assign(window.METRICS || {}, {
     });
   }
 
-  // Boot immediately
+  // Boot + initial paint
   bootMqtt().then(() => {
     renderDock();
     setUpdatedFromMs(null);
   });
+
+  // Periodic re-render to reflect staleness expiry for occupancy
+  setInterval(() => {
+    // If occupancy just crossed the 6h boundary, this will clear it visually
+    renderDock();
+  }, 60 * 1000);
 
   /* ---------- Day Playback integration ---------- */
 
@@ -233,29 +328,41 @@ window.METRICS = Object.assign(window.METRICS || {}, {
     window.__PLAYBACK_ACTIVE = !!active;
   }
 
-  function renderSnapshotToDock(devId, snap, tsMs) {
-    if (!snap) {
-      setValDot(el.tempVal, el.tempDot, '—', '');
-      setValDot(el.humVal,  el.humDot,  '—', '');
-      setValDot(el.tvocVal, el.tvocDot, '—', '');
-      setValDot(el.eco2Val, el.eco2Dot, '—', '');
-      setValDot(el.occVal,  el.occDot,  '—', '');
-      setUpdatedFromMs(tsMs || null);
-      return;
-    }
+  // Render snapshot for both sensor + room occupancy if available
+  function renderSnapshotToDock(primaryDevId, snap, tsMs) {
+    // snap is expected to look like:
+    // {
+    //   sensors: { "<deviceId>": { temp_f, rh_pct, tvoc_ppb, eco2_ppm, occ? } },
+    //   rooms:   { "<roomName>": { count, ts? } or number }
+    //   ...
+    // }
 
-    const t  = (typeof snap.temp_f   === 'number') ? snap.temp_f   : null;
-    const rh = (typeof snap.rh_pct   === 'number') ? snap.rh_pct   : null;
-    const tv = (typeof snap.tvoc_ppb === 'number') ? snap.tvoc_ppb : null;
-    const c2 = (typeof snap.eco2_ppm === 'number') ? snap.eco2_ppm : null;
-    const oc = (typeof snap.occ      === 'number') ? snap.occ      : null;
+    // Sensor slice
+    const s = (primaryDevId && snap?.sensors?.[primaryDevId]) || null;
+
+    const t  = (s && typeof s.temp_f   === 'number') ? s.temp_f   : null;
+    const rh = (s && typeof s.rh_pct   === 'number') ? s.rh_pct   : null;
+    const tv = (s && typeof s.tvoc_ppb === 'number') ? s.tvoc_ppb : null;
+    const c2 = (s && typeof s.eco2_ppm === 'number') ? s.eco2_ppm : null;
+
+    // Room slice (prefer snapshot rooms over sensor occ)
+    let occSnap = null;
+    if (primaryRoomName && snap && snap.rooms && Object.prototype.hasOwnProperty.call(snap.rooms, primaryRoomName)) {
+      const row = snap.rooms[primaryRoomName];
+      if (typeof row === 'number') {
+        occSnap = row;
+      } else if (row && typeof row.count === 'number') {
+        occSnap = row.count;
+      }
+    } else if (s && typeof s.occ === 'number') {
+      occSnap = s.occ;
+    }
 
     setValDot(el.tempVal, el.tempDot, t  != null ? `${t.toFixed(1)} °F` : '—', classify('temp_f',  t));
     setValDot(el.humVal,  el.humDot,  rh != null ? `${rh.toFixed(1)} %` : '—', classify('rh_pct',  rh));
     setValDot(el.tvocVal, el.tvocDot, tv != null ? `${Math.round(tv)} ppb` : '—', classify('tvoc_ppb', tv));
     setValDot(el.eco2Val, el.eco2Dot, c2 != null ? `${Math.round(c2)} ppm` : '—', classify('eco2_ppm', c2));
-    setValDot(el.occVal,  el.occDot,  oc != null ? String(oc) : '—',        classify('occ',     oc));
-
+    setValDot(el.occVal, el.occDot, formatPeople(occSnap), classify('occ', occSnap));
     setUpdatedFromMs(tsMs || Date.now());
   }
 
@@ -269,8 +376,9 @@ window.METRICS = Object.assign(window.METRICS || {}, {
     clearTimeout(__pbIdleTimer);
     __pbIdleTimer = setTimeout(() => setPlaybackActive(false), 2000);
 
-    if (primaryDev && snapshot?.sensors?.[primaryDev]) {
-      renderSnapshotToDock(primaryDev, snapshot.sensors[primaryDev], ts);
+    // Prefer snapshot (both sensor metrics and room occupancy)
+    if ((primaryDev && snapshot?.sensors?.[primaryDev]) || (snapshot?.rooms && primaryRoomName)) {
+      renderSnapshotToDock(primaryDev, snapshot, ts);
     } else {
       // no snapshot for this minute — render blanks but keep time
       renderSnapshotToDock(primaryDev, null, ts);
@@ -284,7 +392,21 @@ window.METRICS = Object.assign(window.METRICS || {}, {
   });
 
   /* ---------- Public API ---------- */
-  return { setPrimaryByDbId, getDeviceByDbId, DBID_TO_DEVICE };
+  const api = {
+    // sensor
+    setPrimaryByDbId,
+    getDeviceByDbId,
+    DBID_TO_DEVICE,
+    // room
+    setPrimaryRoomByDbId,
+    setPrimaryRoomByName,
+    getRoomByDbId,
+    DBID_TO_ROOM
+  };
+
+  // Merge (do not clobber) any previous METRICS
+  window.METRICS = Object.assign(window.METRICS || {}, api);
+  return window.METRICS;
 })();
 
 export default METRICS;

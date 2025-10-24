@@ -1,4 +1,4 @@
-// live_data_viewer.js — polished Live Data popup with ~20-bucket aggregation + CSV
+// live_data_viewer.js — polished Live Data popup with ~20-bucket aggregation + CSV (+room support)
 
 (() => {
   const $ = (sel) => document.querySelector(sel);
@@ -32,6 +32,7 @@
   const FALLBACK_SENSOR_DBID_TO_DEVICE = new Map([[2350, 'dtn-e41358088304']]);
   const FALLBACK_PLUG_DBID_TO_DEVICES  = new Map([[2244, ['dtn-12e7df']]]);
   const FALLBACK_LIGHT_DEVICE_TO_DBIDS = new Map([['dtn-e41358088304', [2394, 2396]]]);
+  const FALLBACK_DBID_TO_ROOM          = new Map([]); // fill if needed
 
   function resolveDevicesFor({ category, dbId }) {
     dbId = Number(dbId);
@@ -55,9 +56,19 @@
       for (const [dev, ids] of FALLBACK_LIGHT_DEVICE_TO_DBIDS) if (ids.includes(dbId)) return [dev];
       return [];
     }
+    if (category === 'room') {
+      const m = window.METRICS;
+      if (typeof m?.getRoomByDbId === 'function') {
+        const room = m.getRoomByDbId(dbId);
+        return room ? [room] : [];
+      }
+      if (FALLBACK_DBID_TO_ROOM.has(dbId)) return [FALLBACK_DBID_TO_ROOM.get(dbId)];
+      return [];
+    }
     return [];
   }
 
+  // What fields each category can chart
   const METRICS_BY_CATEGORY = {
     sensor: [
       { field: 'temp_f',   label: 'Temperature (°F)' },
@@ -69,16 +80,23 @@
       { field: 'volts',      label: 'Voltage (V)' },
       { field: 'amps',       label: 'Current (A)' },
       { field: 'watts',      label: 'Power (W)' },
-      { field: 'energy_wh',  label: 'Energy (Wh)' }, // server also returns energy_kwh if present
+      { field: 'energy_wh',  label: 'Energy (Wh)' }, // server may also return energy_kwh
       { field: 'relay_num',  label: 'Relay (0/1)' }, // server uses last()
     ],
     light: [
       { field: 'light_on_num', label: 'Light ON (0/1)' }, // from env
     ],
+    room: [
+      { field: 'count', label: 'Occupancy (people)' },     // NEW
+    ],
   };
-  const measurementFor = (category) => (category === 'plug' ? 'plugData' : 'env');
 
-  // ---- Target ~20 points: choose aggregation window for any range
+  const measurementFor = (category) =>
+    category === 'plug' ? 'plugData'
+  : category === 'room' ? 'room_count'  // NEW
+  : 'env';
+
+  // ---- Target ~20 points
   function pickEvery({ minutes = null, startISO = null, stopISO = null, targetPts = 20 }) {
     if (minutes != null) {
       const m = Math.max(1, Number(minutes) || 60);
@@ -144,32 +162,38 @@
     return { root, metricSel, devSel, presetButtons, startInp: s, stopInp: e, applyBtn: apply, dlBtn: dl, canvas, overlay };
   }
 
-  function buildQuery({ category, device, field, minutes, startISO, stopISO, every }) {
-    const measurement = measurementFor(category);
-    let fields = field;
-    if (category === 'plug' && field === 'energy_wh') fields = 'energy_wh,energy_kwh';
-    const params = new URLSearchParams({
-      measurement, device, fields,
-      ...(minutes ? { minutes: String(minutes) } : {}),
-      ...(startISO ? { start: startISO } : {}),
-      ...(stopISO  ? { stop:  stopISO } : {}),
-      ...(every    ? { every } : {}),
-    });
-    return `/api/series?${params.toString()}`;
-  }
+  // ---- Query builder: now supports tagKey (room vs device)
+  function buildQuery({ category, device, field, minutes, startISO, stopISO, every, tagKey, agg }) {
+  const measurement = measurementFor(category);
+  let fields = field;
+  if (category === 'plug' && field === 'energy_wh') fields = 'energy_wh,energy_kwh';
 
-  // Format a Date for <input type="datetime-local"> (local tz, no seconds)
-function toLocalInputValue(d) {
-  const pad = (n) => String(n).padStart(2, '0');
-  const y = d.getFullYear();
-  const m = pad(d.getMonth() + 1);
-  const day = pad(d.getDate());
-  const hh = pad(d.getHours());
-  const mm = pad(d.getMinutes());
-  return `${y}-${m}-${day}T${hh}:${mm}`;
+  const params = new URLSearchParams({
+    measurement,
+    device,
+    fields,
+    ...(minutes ? { minutes: String(minutes) } : {}),
+    ...(startISO ? { start: startISO } : {}),
+    ...(stopISO  ? { stop:  stopISO } : {}),
+    ...(every    ? { every } : {}),
+    ...(tagKey   ? { tagKey } : {}),
+    ...(agg      ? { agg }   : {}),   // NEW
+  });
+  return `/api/series?${params.toString()}`;
 }
 
+  // ---- Inputs helpers
+  function toLocalInputValue(d) {
+    const pad = (n) => String(n).padStart(2, '0');
+    const y = d.getFullYear();
+    const m = pad(d.getMonth() + 1);
+    const day = pad(d.getDate());
+    const hh = pad(d.getHours());
+    const mm = pad(d.getMinutes());
+    return `${y}-${m}-${day}T${hh}:${mm}`;
+  }
 
+  // ---- Series utilities
   function normalizeEnergy(series) {
     if (!series) return series;
     if (!series.energy_wh && series.energy_kwh) {
@@ -194,244 +218,199 @@ function toLocalInputValue(d) {
   }
 
   function domainFromSeries(series) {
-  let tMin = Infinity, tMax = -Infinity;
-  for (const arr of Object.values(series || {})) {
-    for (const p of arr || []) {
-      const t = +new Date(p.t);
-      if (Number.isFinite(t)) { if (t < tMin) tMin = t; if (t > tMax) tMax = t; }
-    }
-  }
-  if (!Number.isFinite(tMin) || !Number.isFinite(tMax)) return null;
-  // add a tiny pad (1%) to avoid clipping
-  const pad = Math.max(60000, Math.round((tMax - tMin) * 0.01));
-  return { min: new Date(tMin - pad), max: new Date(tMax + pad) };
-}
-
-function domainFromRequest({ minutes, startISO, stopISO }) {
-  if (startISO && stopISO) return { min: new Date(startISO), max: new Date(stopISO) };
-  if (minutes != null) {
-    const now = Date.now();
-    const ms = Math.max(60_000, Number(minutes) * 60_000);
-    return { min: new Date(now - ms), max: new Date(now) };
-  }
-  return null;
-}
-
-
-  async function downloadRawCSV(canvas) {
-  const req = canvas._lastReq;
-  if (!req) throw new Error('No query context to export.');
-
-  // ask server for un-aggregated data
-  const params = new URLSearchParams({
-    measurement: (req.category === 'plug' ? 'plugData' : 'env'),
-    device: req.device,
-    fields: (req.category === 'plug' && req.field === 'energy_wh')
-              ? 'energy_wh,energy_kwh'
-              : req.field,
-    every: 'raw' // <- tells server: no aggregateWindow
-  });
-  if (req.minutes != null) params.set('minutes', String(req.minutes));
-  if (req.startISO && req.stopISO) {
-    params.set('start', req.startISO);
-    params.set('stop',  req.stopISO);
-  }
-
-  const res = await fetch(`/api/series?${params.toString()}`, { cache:'no-store' });
-  const json = await res.json();
-  if (!res.ok) throw new Error(json?.error || 'Download failed');
-
-  // normalize energy to Wh if needed
-  if (req.category === 'plug' && req.field === 'energy_wh' && !json.series.energy_wh && json.series.energy_kwh) {
-    json.series.energy_wh = (json.series.energy_kwh || []).map(p => ({ t:p.t, v:Number(p.v)*1000 }));
-  }
-
-  // pick the field user selected
-  const field = req.field === 'energy_wh' ? 'energy_wh' : req.field;
-  const arr = json.series?.[field] || [];
-
-  // build CSV
-  const rows = [['time','value','field','device']];
-  arr.forEach(p => rows.push([p.t, p.v, field, req.device]));
-  const csv = rows.map(r => r.map(x => `"${String(x).replace(/"/g,'""')}"`).join(',')).join('\n');
-
-  const blob = new Blob([csv], { type:'text/csv;charset=utf-8' });
-  const url  = URL.createObjectURL(blob);
-  const a    = document.createElement('a');
-  a.href = url;
-  a.download = `${req.device}_${field}_raw.csv`;
-  document.body.appendChild(a);
-  a.click();
-  setTimeout(()=>{ URL.revokeObjectURL(url); a.remove(); }, 0);
-}
-
-
-  let chart = null;
-  // --- drop-in replacement ---
-async function queryAndDrawExec({
-  category,
-  device,
-  field,
-  minutes,
-  startISO,
-  stopISO,
-  every,      // <- now used
-  canvas,
-  overlay     // <- use overlay instead of statusEl
-}) {
-  // overlay helpers
-  const setOverlay = (msg = 'Loading…', show = true) => {
-    if (!overlay) return;
-    overlay.style.display = show ? 'flex' : 'none';
-    const msgEl = overlay.querySelector('.ldv-msg');
-    if (msgEl) msgEl.textContent = msg || '';
-  };
-
-  // domain helpers
-  function domainFromSeries(series) {
     let tMin = Infinity, tMax = -Infinity;
     for (const arr of Object.values(series || {})) {
       for (const p of arr || []) {
         const t = +new Date(p.t);
-        if (Number.isFinite(t)) {
-          if (t < tMin) tMin = t;
-          if (t > tMax) tMax = t;
-        }
+        if (Number.isFinite(t)) { if (t < tMin) tMin = t; if (t > tMax) tMax = t; }
       }
     }
     if (!Number.isFinite(tMin) || !Number.isFinite(tMax)) return null;
-    const pad = Math.max(60_000, Math.round((tMax - tMin) * 0.01));
+    const pad = Math.max(60000, Math.round((tMax - tMin) * 0.01));
     return { min: new Date(tMin - pad), max: new Date(tMax + pad) };
   }
+
   function domainFromRequest({ minutes, startISO, stopISO }) {
     if (startISO && stopISO) return { min: new Date(startISO), max: new Date(stopISO) };
     if (minutes != null) {
       const now = Date.now();
-      const span = Math.max(60_000, Number(minutes) * 60_000);
-      return { min: new Date(now - span), max: new Date(now) };
+      const ms = Math.max(60_000, Number(minutes) * 60_000);
+      return { min: new Date(now - ms), max: new Date(now) };
     }
     return null;
   }
-  function normalizeEnergy(series) {
-    if (!series) return series;
-    if (!series.energy_wh && series.energy_kwh) {
-      series.energy_wh = series.energy_kwh.map(p => ({ t: p.t, v: Number(p.v) * 1000 }));
+
+  // ---- CSV export (supports rooms via tagKey)
+  async function downloadRawCSV(canvas) {
+    const req = canvas._lastReq;
+    if (!req) throw new Error('No query context to export.');
+
+    const meas = (req.category === 'plug') ? 'plugData'
+               : (req.category === 'room') ? 'room_count'
+               : 'env';
+
+    const params = new URLSearchParams({
+      measurement: meas,
+      device: req.device,
+      fields: (req.category === 'plug' && req.field === 'energy_wh')
+                ? 'energy_wh,energy_kwh'
+                : req.field,
+      every: 'raw'
+    });
+    if (req.tagKey) params.set('tagKey', req.tagKey);
+    if (req.minutes != null) params.set('minutes', String(req.minutes));
+    if (req.startISO && req.stopISO) {
+      params.set('start', req.startISO);
+      params.set('stop',  req.stopISO);
     }
-    return series;
+
+    const res = await fetch(`/api/series?${params.toString()}`, { cache:'no-store' });
+    const json = await res.json();
+    if (!res.ok) throw new Error(json?.error || 'Download failed');
+
+    if (req.category === 'plug' && req.field === 'energy_wh' && !json.series.energy_wh && json.series.energy_kwh) {
+      json.series.energy_wh = (json.series.energy_kwh || []).map(p => ({ t:p.t, v:Number(p.v)*1000 }));
+    }
+
+    const field = req.field === 'energy_wh' ? 'energy_wh' : req.field;
+    const arr = json.series?.[field] || [];
+
+    const rows = [['time','value','field', req.tagKey === 'room' ? 'room' : 'device']];
+    arr.forEach(p => rows.push([p.t, p.v, field, req.device]));
+    const csv = rows.map(r => r.map(x => `"${String(x).replace(/"/g,'""')}"`).join(',')).join('\n');
+
+    const blob = new Blob([csv], { type:'text/csv;charset=utf-8' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href = url;
+    a.download = `${req.device}_${field}_raw.csv`;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(()=>{ URL.revokeObjectURL(url); a.remove(); }, 0);
   }
 
-  // show loading
-  setOverlay('Loading…', true);
+  // --- query + draw core (uses overlay, supports tagKey)
+  async function queryAndDrawExec({
+    category,
+    device,
+    field,
+    minutes,
+    startISO,
+    stopISO,
+    every,
+    canvas,
+    overlay,
+    tagKey, 
+    agg
+  }) {
+    const setOverlay = (msg = 'Loading…', show = true) => {
+      if (!overlay) return;
+      overlay.style.display = show ? 'flex' : 'none';
+      const msgEl = overlay.querySelector('.ldv-msg');
+      if (msgEl) msgEl.textContent = msg || '';
+    };
 
-  // fetch series via your server (includes `every`)
-  const url = buildQuery({ category, device, field, minutes, startISO, stopISO, every });
-  let json;
-  try {
-    const res = await fetch(url, { cache: 'no-store' });
-    json = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(json?.error || 'Query failed');
-  } catch (e) {
-    setOverlay(`Error: ${e.message || e}`, true);
-    // auto-hide after a moment so the user can try again
-    setTimeout(() => setOverlay('', false), 1800);
-    const old = window.Chart && window.Chart.getChart(canvas);
-    if (old) old.destroy();
-    return;
-  }
+    setOverlay('Loading…', true);
 
-  // energy normalization for plugs
-  if (category === 'plug' && field === 'energy_wh') {
-    json.series = normalizeEnergy(json.series);
-  }
+    const url = buildQuery({ category, device, field, minutes, startISO, stopISO, every, tagKey, agg });
+    let json;
+    try {
+      const res = await fetch(url, { cache: 'no-store' });
+      json = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(json?.error || 'Query failed');
+    } catch (e) {
+      setOverlay(`Error: ${e.message || e}`, true);
+      setTimeout(() => setOverlay('', false), 1800);
+      const old = window.Chart && window.Chart.getChart(canvas);
+      if (old) old.destroy();
+      return;
+    }
 
-  const series = json.series || {};
-  const fields = Object.keys(series);
+    if (category === 'plug' && field === 'energy_wh') {
+      json.series = normalizeEnergy(json.series);
+    }
 
-  // expose for CSV button
-  canvas._lastReq = { category, device, field, minutes, startISO, stopISO };
-  canvas._lastSeriesJson = json;
+    const series = json.series || {};
+    const fields = Object.keys(series);
 
-  // no data
-  if (fields.length === 0) {
-    const old = window.Chart && window.Chart.getChart(canvas);
-    if (old) old.destroy();
+    canvas._lastReq = { category, device, field, minutes, startISO, stopISO, tagKey, agg };
+    canvas._lastSeriesJson = json;
+
+    if (fields.length === 0) {
+      const old = window.Chart && window.Chart.getChart(canvas);
+      if (old) old.destroy();
+      new Chart(canvas.getContext('2d'), {
+        type: 'line',
+        data: { datasets: [] },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: { title: { display: true, text: 'No data in range' } },
+          scales: { x: { type: 'time' } }
+        }
+      });
+      setOverlay('No data in range.', true);
+      setTimeout(() => setOverlay('', false), 1200);
+      return;
+    }
+
+    const datasets = datasetsFrom(series, field);
+
+    let dom = domainFromRequest({ minutes, startISO, stopISO });
+    if (!dom) dom = domainFromSeries(series);
+
+    const existing = window.Chart && window.Chart.getChart(canvas);
+    if (existing) existing.destroy();
+
     new Chart(canvas.getContext('2d'), {
       type: 'line',
-      data: { datasets: [] },
+      data: { datasets },
       options: {
         responsive: true,
         maintainAspectRatio: false,
-        plugins: { title: { display: true, text: 'No data in range' } },
-        scales: { x: { type: 'time' } }
-      }
-    });
-    setOverlay('No data in range.', true);
-    setTimeout(() => setOverlay('', false), 1200);
-    return;
-  }
-
-  // datasets (use your helper name)
-  const datasets = datasetsFrom(series, field);
-
-  // x-domain: prefer request window; else data envelope
-  let dom = domainFromRequest({ minutes, startISO, stopISO });
-  if (!dom) dom = domainFromSeries(series);
-
-  // draw
-  const existing = window.Chart && window.Chart.getChart(canvas);
-  if (existing) existing.destroy();
-
-  new Chart(canvas.getContext('2d'), {
-    type: 'line',
-    data: { datasets },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      animation: { duration: 140 },
-      parsing: false,
-      spanGaps: true,
-      interaction: { mode: 'nearest', intersect: false },
-      plugins: {
-        legend: { position: 'top', labels: { boxWidth: 10, boxHeight: 10 } },
-        title: { display: false },
-        // keep it readable: ~20 points using LTTB
-        decimation: { enabled: true, algorithm: 'lttb', samples: 20 },
-        tooltip: {
-          callbacks: {
-            label: (c) => {
-              const y = c.parsed?.y;
-              return `${c.dataset.label}: ${typeof y === 'number' ? y.toFixed(3) : y}`;
+        animation: { duration: 140 },
+        parsing: false,
+        spanGaps: true,
+        interaction: { mode: 'nearest', intersect: false },
+        plugins: {
+          legend: { position: 'top', labels: { boxWidth: 10, boxHeight: 10 } },
+          title: { display: false },
+          decimation: { enabled: true, algorithm: 'lttb', samples: 20 },
+          tooltip: {
+            callbacks: {
+              label: (c) => {
+                const y = c.parsed?.y;
+                const n = (typeof y === 'number') ? y : null;
+                if (field === 'count') return `${c.dataset.label}: ${n != null ? (n === 1 ? '1 person' : `${n} people`) : y}`;
+                return `${c.dataset.label}: ${typeof y === 'number' ? y.toFixed(3) : y}`;
+              }
             }
           }
-        }
-      },
-      scales: {
-        x: {
-          type: 'time',
-          time: { tooltipFormat: 'MMM d, HH:mm' },
-          ...(dom ? { min: dom.min, max: dom.max } : {}),
-          ticks: { source: 'auto', color: 'rgba(255,255,255,.75)' },
-          grid: { color: 'rgba(255,255,255,.06)' }
         },
-        y: {
-          beginAtZero: false,
-          ticks: { color: 'rgba(255,255,255,.75)' },
-          grid: { color: 'rgba(255,255,255,.06)' }
+        scales: {
+          x: {
+            type: 'time',
+            time: { tooltipFormat: 'MMM d, HH:mm' },
+            ...(dom ? { min: dom.min, max: dom.max } : {}),
+            ticks: { source: 'auto', color: 'rgba(255,255,255,.75)' },
+            grid: { color: 'rgba(255,255,255,.06)' }
+          },
+          y: {
+            beginAtZero: false,
+            ticks: { color: 'rgba(255,255,255,.75)' },
+            grid: { color: 'rgba(255,255,255,.06)' }
+          }
+        },
+        layout: { padding: { top: 6, right: 6, bottom: 0, left: 0 } },
+        elements: {
+          point: { radius: 0, hoverRadius: 3, hitRadius: 6 },
+          line: { borderWidth: 1.6, tension: 0.2 }
         }
-      },
-      layout: { padding: { top: 6, right: 6, bottom: 0, left: 0 } },
-      elements: {
-        point: { radius: 0, hoverRadius: 3, hitRadius: 6 },
-        line: { borderWidth: 1.6, tension: 0.2 }
       }
-    }
-  });
+    });
 
-  // hide loading
-  setOverlay('', false);
-}
-
-
+    setOverlay('', false);
+  }
 
   // ---- Event wiring
   window.addEventListener('openLiveData', async (ev) => {
@@ -448,7 +427,7 @@ async function queryAndDrawExec({
     const devices = resolveDevicesFor({ category, dbId });
     if (!devices.length) {
       dom.title.textContent = 'Live Data';
-      const note = document.createElement('div'); note.className='ldv-empty'; note.textContent=`No device mapping for dbId ${dbId} (${category}).`;
+      const note = document.createElement('div'); note.className='ldv-empty'; note.textContent=`No mapping for dbId ${dbId} (${category}).`;
       dom.body.appendChild(note); setTimeout(closePopup, 2200); return;
     }
 
@@ -467,28 +446,33 @@ async function queryAndDrawExec({
     const getDevice = () => (devSel ? devSel.value : defaultDevice);
     const getField  = () => metricSel.value;
     const setActivePreset = (btn) => presetButtons.forEach(b => b.classList.toggle('active', b === btn));
+    const tagKey = (category === 'room') ? 'room' : undefined; // NEW
+    const agg    = (category === 'room') ? 'max' : undefined;
 
     async function queryAndDraw({ minutes = '60', startISO = null, stopISO = null } = {}) {
       const every = pickEvery({ minutes, startISO, stopISO, targetPts: 20 });
       dom.title.textContent = `${getDevice()} — Live Data`;
-      await queryAndDrawExec({ category, device: getDevice(), field: getField(), minutes, startISO, stopISO, every, canvas, overlay });
+      await queryAndDrawExec({
+        category,
+        device: getDevice(),
+        field: getField(),
+        minutes, startISO, stopISO,
+        every,
+        canvas, overlay,
+        tagKey ,
+        agg   
+      });
     }
 
-    presetButtons.forEach(btn =>
-  btn.addEventListener('click', () => {
-    const mins = Number(btn.dataset.minutes);
-    const end = new Date();                    // now (local)
-    const start = new Date(end.getTime() - mins * 60_000);
-
-    // reflect the range in the manual inputs
-    startInp.value = toLocalInputValue(start);
-    stopInp.value  = toLocalInputValue(end);
-
-    setActivePreset(btn);
-    queryAndDraw({ minutes: String(mins) });
-  })
-);
-
+    presetButtons.forEach(btn => btn.addEventListener('click', () => {
+      const mins = Number(btn.dataset.minutes);
+      const end = new Date();                    // now (local)
+      const start = new Date(end.getTime() - mins * 60_000);
+      startInp.value = toLocalInputValue(start);
+      stopInp.value  = toLocalInputValue(end);
+      setActivePreset(btn);
+      queryAndDraw({ minutes: String(mins) });
+    }));
 
     on(metricSel, 'change', () => queryAndDraw());
     if (devSel) on(devSel, 'change', () => queryAndDraw());
@@ -505,29 +489,28 @@ async function queryAndDrawExec({
     });
 
     if (dlBtn) on(dlBtn, 'click', async () => {
-  try {
-    overlay.style.display='flex';
-    overlay.querySelector('.ldv-msg').textContent='Preparing CSV…';
-    await downloadRawCSV(canvas);
-    overlay.style.display='none';
-  } catch (e) {
-    overlay.querySelector('.ldv-msg').textContent = `CSV error: ${e.message || e}`;
-    setTimeout(()=> overlay.style.display='none', 1500);
-  }
-});
-
+      try {
+        overlay.style.display='flex';
+        overlay.querySelector('.ldv-msg').textContent='Preparing CSV…';
+        await downloadRawCSV(canvas);
+        overlay.style.display='none';
+      } catch (e) {
+        overlay.querySelector('.ldv-msg').textContent = `CSV error: ${e.message || e}`;
+        setTimeout(()=> overlay.style.display='none', 1500);
+      }
+    });
 
     // initial: 1h
     {
-  const end = new Date();
-  const start = new Date(end.getTime() - 60 * 60_000); // 1 hour ago
-  startInp.value = toLocalInputValue(start);
-  stopInp.value  = toLocalInputValue(end);
-  setActivePreset(presetButtons[0]);
-  queryAndDraw({ minutes: '60' }).catch(err => {
-    overlay.style.display='flex';
-    overlay.querySelector('.ldv-msg').textContent = `Error: ${err?.message || err}`;
-  });
-}
+      const end = new Date();
+      const start = new Date(end.getTime() - 60 * 60_000);
+      startInp.value = toLocalInputValue(start);
+      stopInp.value  = toLocalInputValue(end);
+      setActivePreset(presetButtons[0]);
+      queryAndDraw({ minutes: '60' }).catch(err => {
+        overlay.style.display='flex';
+        overlay.querySelector('.ldv-msg').textContent = `Error: ${err?.message || err}`;
+      });
+    }
   });
 })();

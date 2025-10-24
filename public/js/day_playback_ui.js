@@ -5,9 +5,12 @@
 
   // Build device lists from your live maps
   function collectDevices() {
-    const out = { sensors: [], plugs: [], lights: [] };
+    const out = { sensors: [], plugs: [], lights: [], rooms: [] };
     if (window.METRICS?.DBID_TO_DEVICE instanceof Map) {
       for (const [dbid, device] of window.METRICS.DBID_TO_DEVICE) out.sensors.push({ dbid, device });
+    }
+    if (window.METRICS?.DBID_TO_ROOM instanceof Map) {
+      for (const [dbid, room] of window.METRICS.DBID_TO_ROOM) out.rooms.push({ dbid, room });
     }
     if (window.PLUGS?.DBID_TO_DEVICES instanceof Map) {
       for (const [dbid, devices] of window.PLUGS.DBID_TO_DEVICES) if (devices?.length) out.plugs.push({ dbid, devices:[...devices] });
@@ -17,6 +20,16 @@
     }
     return out;
   }
+
+  function fillRooms(list, rooms){
+  rooms.forEach(({dbid,room})=>{
+    const lab=document.createElement('label'); lab.style.cssText='display:flex;gap:8px;align-items:center;';
+    const cb=document.createElement('input'); cb.type='checkbox'; cb.dataset.type='room'; cb.dataset.room=room; cb.checked=true; // default checked
+    const t=document.createElement('div'); t.textContent=`dbId ${dbid} • ${room}`; t.style.cssText='opacity:.9';
+    lab.append(cb,t); list.appendChild(lab);
+  });
+}
+
 
   // Small, simple config UI inside your existing popup shell
   function openConfigModal() {
@@ -45,11 +58,12 @@
     );
 
     const lists = document.createElement('div');
-    lists.style.cssText = 'display:grid;gap:8px;grid-template-columns:repeat(3,minmax(140px,1fr));align-items:start;';
+    lists.style.cssText = 'display:grid;gap:8px;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));align-items:start;';
     const sensorsBox = listBox('Sensors');
+    const roomsBox   = listBox('Rooms');
     const plugsBox   = listBox('Plugs');
     const lightsBox  = listBox('Lights');
-    lists.append(sensorsBox.wrap, plugsBox.wrap, lightsBox.wrap);
+    lists.append(sensorsBox.wrap, roomsBox.wrap, plugsBox.wrap, lightsBox.wrap);
 
     const btns = document.createElement('div');
     btns.style.cssText = 'display:flex;gap:10px;justify-content:flex-end;';
@@ -70,6 +84,7 @@
     // Fill device lists from maps
     const maps = collectDevices();
     fillSensors(sensorsBox.list, maps.sensors);
+    fillRooms(roomsBox.list, maps.rooms);
     fillPlugs(plugsBox.list, maps.plugs);
     fillLights(lightsBox.list, maps.lights);
 
@@ -81,7 +96,7 @@
   }
 
   const selection = readSelectionFrom(lists);
-  if (!selection.sensors.length && !selection.plugs.length && !selection.lights.length) {
+  if (!selection.sensors.length && !selection.rooms.length && !selection.plugs.length && !selection.lights.length) {
     window.AppToast?.('Pick at least one device', 'info'); 
     return;
   }
@@ -137,6 +152,7 @@
     plugs.forEach(({dbid,devices})=>{
       const lab=document.createElement('label'); lab.style.cssText='display:flex;gap:8px;align-items:center;';
       const cb=document.createElement('input'); cb.type='checkbox'; cb.dataset.type='plug'; cb.dataset.devices=devices.join(',');
+      cb.checked = true; 
       const t=document.createElement('div'); t.textContent=`dbId ${dbid} • ${devices.join(' · ')}`; t.style.cssText='opacity:.9';
       lab.append(cb,t); list.appendChild(lab);
     });
@@ -145,19 +161,21 @@
     lights.forEach(({device,dbids})=>{
       const lab=document.createElement('label'); lab.style.cssText='display:flex;gap:8px;align-items:center;';
       const cb=document.createElement('input'); cb.type='checkbox'; cb.dataset.type='light'; cb.dataset.device=device;
+      cb.checked = true; 
       const t=document.createElement('div'); t.textContent=`${device} • dbIds: ${dbids.join(', ')}`; t.style.cssText='opacity:.9';
       lab.append(cb,t); list.appendChild(lab);
     });
   }
   function readSelectionFrom(container){
-    const sel = { sensors:[], plugs:[], lights:[] };
+    const sel = { sensors:[], plugs:[], lights:[], rooms:[] };
     container.querySelectorAll('input[type="checkbox"]:checked').forEach(cb=>{
       const type=cb.dataset.type;
       if (type==='sensor') sel.sensors.push(cb.dataset.device);
+      if (type==='room')   sel.rooms.push(cb.dataset.room);
       if (type==='plug')   sel.plugs.push(...cb.dataset.devices.split(',').map(s=>s.trim()).filter(Boolean));
       if (type==='light')  sel.lights.push(cb.dataset.device);
     });
-    sel.sensors=[...new Set(sel.sensors)]; sel.plugs=[...new Set(sel.plugs)]; sel.lights=[...new Set(sel.lights)];
+    sel.sensors=[...new Set(sel.sensors)]; sel.rooms  =[...new Set(sel.rooms)]; sel.plugs=[...new Set(sel.plugs)]; sel.lights=[...new Set(sel.lights)];
     return sel;
   }
   function localToISO(dateStr, timeStr){
@@ -260,6 +278,59 @@
     #playbackDock .pbx-scrub { width:100%; }
     #playbackDock .pbx-time { font:12px/1.2 system-ui,sans-serif; color:#cbd5e1; }
     #playbackDock .pbx-speed { padding:6px 8px; border-radius:8px; background:#10151f; border:1px solid #283241; color:#fff; }
+
+    /* ==== Day Playback Config Modal ==== */
+  .dpb-root {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    min-width: 520px;
+    max-height: 90vh;
+  }
+
+  .dpb-root .dpb-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+
+  .dpb-root .dpb-field label {
+    font-size: 12px;
+    opacity: 0.8;
+  }
+
+  /* Button row pinned to bottom */
+  .dpb-root .dpb-controls,
+  .dpb-root .dpb-btns {
+    margin-top: auto;
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    padding-top: 12px;
+    border-top: 1px solid #2a2a2a;
+  }
+
+  .dpb-root .dpb-btns button {
+    background: #1c2432;
+    color: #fff;
+    border: 1px solid #2b3445;
+    border-radius: 8px;
+    padding: 6px 12px;
+    cursor: pointer;
+  }
+
+  .dpb-root .dpb-btns button.btnP {
+    background: #0ea5e9;
+    border-color: #0ea5e9;
+    color: #fff;
+  }
+
+  /* Optional: keep button row visible if scrollable */
+  .dpb-root .dpb-btns.sticky {
+    position: sticky;
+    bottom: 0;
+    background: #0d1117;
+  }
   `;
   document.head.appendChild(style);
 

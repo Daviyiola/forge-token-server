@@ -6,13 +6,20 @@
 
   /* ========== Collect devices from your modules ========== */
   function collectDevices() {
-    const out = { sensors: [], plugs: [], lights: [] };
+    const out = { sensors: [], plugs: [], lights: [], rooms: [] };
 
     if (window.METRICS?.DBID_TO_DEVICE instanceof Map) {
       for (const [dbid, device] of window.METRICS.DBID_TO_DEVICE) {
         out.sensors.push({ dbid, device });
       }
     }
+
+    if (window.METRICS?.DBID_TO_ROOM instanceof Map) {
+      for (const [dbid, room] of window.METRICS.DBID_TO_ROOM) {
+        out.rooms.push({ dbid, room });
+      }
+    }
+
     if (window.PLUGS?.DBID_TO_DEVICES instanceof Map) {
       for (const [dbid, devices] of window.PLUGS.DBID_TO_DEVICES) {
         if (Array.isArray(devices) && devices.length) out.plugs.push({ dbid, devices: [...devices] });
@@ -101,7 +108,7 @@
     return wrap;
   }
 
-  function renderDeviceLists({ sensors, plugs, lights }) {
+  function renderDeviceLists({ sensors, plugs, lights, rooms }) {
     const S = $('#dpbSensors'), P = $('#dpbPlugs'), L = $('#dpbLights');
     const primary = getPrimarySensorDevice();
 
@@ -119,13 +126,35 @@
       S.appendChild(row);
     });
 
+    let R = document.getElementById('dpbRooms');
+    if (!R) {
+      const roomsGroup = document.createElement('div');
+      roomsGroup.className = 'dpb-group';
+      roomsGroup.innerHTML = `<div class="dpb-legend">Rooms</div><div id="dpbRooms" class="dpb-list"></div>`;
+      // Insert Rooms above Plugs
+      S.parentElement.appendChild(roomsGroup);
+      R = roomsGroup.querySelector('#dpbRooms');
+    }
+    R.innerHTML = '';
+    (rooms || []).forEach(({ dbid, room }) => {
+      const id = `room_${dbid}`;
+      const row = document.createElement('label');
+      row.className = 'dpb-item';
+      row.innerHTML = `
+        <input type="checkbox" id="${id}" data-type="room" data-room="${room}" checked />
+        <span class="dbid">dbId ${dbid}</span>
+        <span class="dev">${room}</span>
+      `;
+      R.appendChild(row);
+    });
+
     P.innerHTML = '';
     plugs.forEach(({ dbid, devices }) => {
       const id = `plug_${dbid}`;
       const row = document.createElement('label');
       row.className = 'dpb-item';
       row.innerHTML = `
-        <input type="checkbox" id="${id}" data-type="plug" data-devices="${devices.join(',')}" />
+        <input type="checkbox" id="${id}" data-type="plug" data-devices="${devices.join(',')}" checked />
         <span class="dbid">dbId ${dbid}</span>
         <span class="dev">${devices.join('  •  ')}</span>
       `;
@@ -138,7 +167,7 @@
       const row = document.createElement('label');
       row.className = 'dpb-item';
       row.innerHTML = `
-        <input type="checkbox" id="${id}" data-type="light" data-device="${device}" />
+        <input type="checkbox" id="${id}" data-type="light" data-device="${device}" checked />
         <span class="dev">${device}</span>
         <span class="dbid">dbIds: ${dbids.join(', ')}</span>
       `;
@@ -234,11 +263,16 @@
 
   /* ========== Build selection from checkboxes ========== */
   function readSelection() {
-    const sel = { sensors: [], plugs: [], lights: [] };
+    const sel = { sensors: [], plugs: [], lights: [], rooms: [] };
 
     document.querySelectorAll('#dpbSensors input[type="checkbox"]:checked').forEach(cb => {
       const device = cb.getAttribute('data-device');
       if (device) sel.sensors.push(device);
+    });
+
+    document.querySelectorAll('#dpbRooms input[type="checkbox"]:checked').forEach(cb => {
+      const room = cb.getAttribute('data-room');
+      if (room) sel.rooms.push(room);
     });
 
     document.querySelectorAll('#dpbPlugs input[type="checkbox"]:checked').forEach(cb => {
@@ -252,6 +286,7 @@
     });
 
     sel.sensors = [...new Set(sel.sensors)];
+    sel.rooms   = [...new Set(sel.rooms)];
     sel.plugs   = [...new Set(sel.plugs)];
     sel.lights  = [...new Set(sel.lights)];
     return sel;
@@ -354,7 +389,7 @@
     const lastFieldSet     = new Set(['relay_num','energy_wh','energy_kwh','light_on_num']);
 
     // init snapshots
-    const snapshots = new Array(ticks.length).fill(null).map(() => ({ sensors:{}, plugs:{}, lights:{} }));
+    const snapshots = new Array(ticks.length).fill(null).map(() => ({ sensors:{}, plugs:{}, lights:{}, rooms:{} }));
 
     // sensors
     for (const dev of sel.sensors) {
@@ -367,6 +402,26 @@
       for (let i=0;i<ticks.length;i++){
         (snapshots[i].sensors[dev] ||= {});
         for (const f of Object.keys(ras)) snapshots[i].sensors[dev][f] = ras[f][i];
+      }
+    }
+
+    //rooms (occupancy). Use 1m buckets, agg=MAX by default.
+    for (const room of sel.rooms) {
+      const { series } = await fetchSeries({
+        measurement: 'room_count',
+        device: room,          // backend treats as tag value
+        tagKey: 'room',        // filter by room tag
+        fields: 'count',
+        start: startISO,
+        stop:  stopISO,
+        every: '1m',
+        agg: 'max'             // or 'median' if you prefer
+      });
+      // Rasterize to minutes (re-using existing helper)
+      const ras = rasterizeToMinutes({ ticks, series, lastFields: new Set() });
+      const arr = ras.count || new Array(ticks.length).fill(null);
+      for (let i = 0; i < ticks.length; i++) {
+        snapshots[i].rooms[room] = arr[i] == null ? null : Math.round(Number(arr[i]));
       }
     }
 
@@ -413,7 +468,7 @@
     const clock = $('#dpbClock');
     if (clock && ticks.length) clock.textContent = new Date(ticks[0]).toLocaleString();
     setControlsEnabled(true);
-    setStatus(`Loaded ${ticks.length} minutes • ${sel.sensors.length} sensor(s), ${sel.plugs.length} plug(s), ${sel.lights.length} light source(s).`);
+    setStatus(`Loaded ${ticks.length} minutes • ${sel.sensors.length} sensor(s), ${sel.rooms.length} room(s), ${sel.plugs.length} plug(s), ${sel.lights.length} light(s).`);
     emitState();
   }
 
@@ -502,7 +557,7 @@ function setSpeed(sp) {
       const lightFieldsLast  = ['light_on_num'];
       const lastFieldSet     = new Set(['relay_num','energy_wh','energy_kwh','light_on_num']);
 
-      const snapshots = new Array(ticks.length).fill(null).map(() => ({ sensors:{}, plugs:{}, lights:{} }));
+      const snapshots = new Array(ticks.length).fill(null).map(() => ({ sensors:{}, plugs:{}, lights:{}, rooms:{} }));
 
       for (const dev of (selection.sensors || [])) {
         const series = await fetchFieldSet({ measurement:'env', device:dev, fieldsMean:sensorFieldsMean, fieldsLast:[], startISO, stopISO, every:'1m' });
@@ -510,6 +565,24 @@ function setSpeed(sp) {
         for (let i=0;i<ticks.length;i++){
           (snapshots[i].sensors[dev] ||= {});
           for (const f of Object.keys(ras)) snapshots[i].sensors[dev][f] = ras[f][i];
+        }
+      }
+      
+      for (const room of (selection.rooms || [])) {
+        const { series } = await fetchSeries({
+          measurement: 'room_count',
+          device: room,
+          tagKey: 'room',
+          fields: 'count',
+          start: startISO,
+          stop:  stopISO,
+          every: '1m',
+          agg: 'max' // or 'median'
+        });
+        const ras = rasterizeToMinutes({ ticks, series, lastFields: new Set() });
+        const arr = ras.count || new Array(ticks.length).fill(null);
+        for (let i=0;i<ticks.length;i++){
+          snapshots[i].rooms[room] = arr[i] == null ? null : Math.round(Number(arr[i]));
         }
       }
       for (const dev of (selection.plugs || [])) {

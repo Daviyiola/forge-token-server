@@ -47,38 +47,37 @@ function buildFluxTagOnly({
   fields = "temp_c,rh_pct",
   minutes = "60",
   every = "1m",
-  start,          // optional ISO
-  stop,           // optional ISO
+  start,
+  stop,
+  tagKey = "device",
+  agg = "mean"                    // NEW
 }) {
   const fieldArray = String(fields).split(",").map(s => s.trim()).filter(Boolean);
   const set = fieldArray.map(f => `"${f}"`).join(", ");
-  const dev = (device || "").trim().replace(/"/g, '\\"');
+  const tagVal = (device || "").trim().replace(/"/g, '\\"');
+  const key = String(tagKey || 'device').replace(/[^A-Za-z0-9_]/g, '');
 
-  // Prefer explicit window, else relative minutes
   const rangeLine = (start && stop)
     ? `|> range(start: time(v: "${start}"), stop: time(v: "${stop}"))`
     : `|> range(start: -${String(minutes)}m)`;
 
-  // Normalize every and decide whether to aggregate
   const ev = (every ?? "").toString().trim().toLowerCase();
   const skipAgg = !ev || ev === "raw" || ev === "0s" || ev === "none";
+  const aggLine = skipAgg ? "" : `|> aggregateWindow(every: ${every}, fn: ${agg}, createEmpty: false)`; // NEW
 
-  const aggLine = skipAgg
-    ? "" // <-- NO aggregateWindow when raw/0s/none
-    : `|> aggregateWindow(every: ${every}, fn: mean, createEmpty: false)`;
+  const tagClause = tagVal ? `|> filter(fn: (r) => r.${key} == "${tagVal}")` : "";
 
   return `
 from(bucket: "${bucket}")
   ${rangeLine}
   |> filter(fn: (r) => r._measurement == "${measurement}")
-  ${dev ? `|> filter(fn: (r) => r.device == "${dev}")` : ""}
+  ${tagClause}
   |> filter(fn: (r) => contains(value: r._field, set: [${set}]))
   ${aggLine}
   |> keep(columns: ["_time","_field","_value"])
   |> yield(name: "series")
 `;
 }
-
 
 
 // Build a Flux query that unions pipelines per field so we can choose fn per field.
@@ -287,8 +286,12 @@ app.get("/api/series", async (req, res) => {
   const stop        = req.query.stop  ? String(req.query.stop)  : undefined;
   const device      = (req.query.device || "").trim();
   const fields      = String(req.query.fields || "temp_c,rh_pct");
+  const tagKey      = req.query.tagKey ? String(req.query.tagKey) : 'device'; 
+  const aggRaw      = (req.query.agg || '').toString().toLowerCase(); // NEW
+  const allowedAggs = new Set(['mean','median','max','min','last']);  // NEW
+  const agg         = allowedAggs.has(aggRaw) ? aggRaw : 'mean';      // default
 
-  const flux = buildFluxTagOnly({ bucket, measurement, device, fields, minutes, every, start, stop });
+  const flux = buildFluxTagOnly({ bucket, measurement, device, fields, minutes, every, start, stop, tagKey, agg });
 
   try {
     const rows = await queryApi.collectRows(flux);
