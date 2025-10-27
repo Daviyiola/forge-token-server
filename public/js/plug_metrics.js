@@ -53,7 +53,7 @@ const PLUGS = (() => {
   }
   function colorFromWatts(w) {
     if (w == null || w < 1) return COLOR_GRAY;
-    if (w <= 20) return COLOR_YELLOW;
+    if (w <= 25) return COLOR_YELLOW;
     return COLOR_GREEN;
   }
 
@@ -161,7 +161,7 @@ const PLUGS = (() => {
           if (row && typeof row.watts === 'number') { sumW += row.watts; any = true; }
         });
         const watts = any ? sumW : null;
-        const dotColor = (watts == null || watts < 1) ? '#8b8b8b' : (watts <= 20 ? '#f5c542' : '#27b065');
+        const dotColor = (watts == null || watts < 1) ? '#8b8b8b' : (watts <= 25 ? '#f5c542' : '#27b065');
         container.innerHTML = `
           <span style="width:8px;height:8px;border-radius:999px;display:inline-block;background:${dotColor};
                        box-shadow: inset 0 0 0 2px rgba(255,255,255,.08);"></span>
@@ -177,7 +177,7 @@ const PLUGS = (() => {
 
       // Live
       const { watts, ts_ms, stale, relay } = mergedForDbId(dbId);
-      const dotColor = (watts == null || watts < 1) ? '#8b8b8b' : (watts <= 20 ? '#f5c542' : '#27b065');
+      const dotColor = (watts == null || watts < 1) ? '#8b8b8b' : (watts <= 25 ? '#f5c542' : '#27b065');
       const age  = ts_ms ? `${secsAgo(ts_ms)}s` : '—';
       container.innerHTML = `
         <span style="width:8px;height:8px;border-radius:999px;display:inline-block;background:${dotColor};
