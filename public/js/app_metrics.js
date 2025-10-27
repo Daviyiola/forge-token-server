@@ -34,7 +34,7 @@ const METRICS = (() => {
   ]);
 
   // Consider occupancy "stale" after 6 hours with no message
-  const OCC_CLEAR_AFTER_MS = 6 * 60 * 60 * 1000; // 6h
+  const OCC_CLEAR_AFTER_MS = 24 * 60 * 60 * 1000; // 24h
 
   let primaryRoomName = null;
   try {
