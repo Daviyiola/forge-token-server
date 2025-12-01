@@ -263,8 +263,8 @@ function renderEventsTab(root) {
         el('td', {}, valuesStr),
         el('td', {},
           ev.acked
-            ? chip('ack', 'chip sm ok')
-            : btn('Ack', async () => {
+            ? chip('ok', 'chip sm ok')
+            : btn('Ok', async () => {
                 if (!canEdit()) { window.AppToast?.('Unlock to ack alerts','error'); return; }
                 await ALERTS.ackEvent(ev.id);
                 renderEventsTab(root);

@@ -390,7 +390,8 @@ from(bucket: "${INFLUX_BUCKET}")
                  : (r._field === 'energy_kwh') ? (r._value * 1000)
                  : NaN;
         if (!Number.isFinite(vWh)) continue;
-        (byDev.get(dev) || byDev.set(dev, []).get(dev)).push({ t: r._time, v: vWh });
+        if (!byDev.has(dev)) byDev.set(dev, []);
+          byDev.get(dev).push({ t: r._time, v: vWh });  
       }
       const deltas = [];
       for (const [dev, arr] of byDev) {
@@ -470,7 +471,8 @@ from(bucket: "${INFLUX_BUCKET}")
     const flat = values.flat().filter(v=>v!=null && !Number.isNaN(v));
     const min = flat.length ? Math.min(...flat) : 0;
     const max = flat.length ? Math.max(...flat) : 1;
-    const dayLabel = new Date(start).toLocaleDateString('en-US',{ timeZone: tz, weekday:'short' });
+    const labelDate = new Date(new Date(stop).getTime() - 1000);
+    const dayLabel  = labelDate.toLocaleDateString('en-US', { timeZone: tz, weekday:'short' });
 
     return res.json({
       grid: values, // [24][1]
@@ -702,7 +704,8 @@ from(bucket: "${INFLUX_BUCKET}")
         if (localMax > vmax) vmax = localMax;
       }
 
-      days.push(weekdayLabel(cursorStart, tz));
+      const labelDate = new Date(cursorEnd.getTime() - 1000); // 1s before stop
+      days.push(weekdayLabel(labelDate));
       totalPoints += points;
       loaded += 1;
 

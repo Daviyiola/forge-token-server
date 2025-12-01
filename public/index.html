@@ -4,6 +4,7 @@
   <meta charset="UTF-8" />
   <title>Digital Twin Viewer</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />  
+  <link href="https://fonts.googleapis.com/css2?family=Lato:wght@300;400;700;900&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="https://developer.api.autodesk.com/modelderivative/v2/viewers/7.*/style.min.css" />
   <script src="https://developer.api.autodesk.com/modelderivative/v2/viewers/7.*/viewer3D.min.js"></script>
   <link rel="stylesheet" href="/assets/styles.css" />
@@ -43,12 +44,14 @@
       <button class="x" id="drawerClose" type="button" aria-label="Close">Close</button>
     </div>
     <nav id="drawerNav" aria-label="Sections">
-      <button class="nav-item" data-open="day">Day Playback</button>
-      <button class="nav-item" data-open="rules">Rules</button>
-      <button class="nav-item" data-open="alerts">Alerts</button>
-      <button class="nav-item" data-open="summaries">Summaries</button>
-      <button class="nav-item" data-open="heatmap">Heatmap</button>
-    </nav>
+  <button class="nav-item" data-open="day">Day Playback</button>
+  <button class="nav-item" data-open="rules">Rules</button>
+  <button class="nav-item" data-open="alerts">
+    Alerts <span id="navAlertsBadge" class="badge"></span>
+  </button>
+  <button class="nav-item" data-open="summaries">Summaries</button>
+  <button class="nav-item" data-open="heatmap">Heatmap</button>
+</nav>
   </aside>
 
   <!-- Popups (re-usable modal shells) -->

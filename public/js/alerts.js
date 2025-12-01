@@ -179,6 +179,96 @@ export const ALERTS = (() => {
     scheduleTick();
   }
 
+    function roomFromDeviceId(deviceId) {
+    const m = window.METRICS || {};
+    // Preferred: DEVICE_TO_ROOM map from app_metrics.js
+    if (m.DEVICE_TO_ROOM instanceof Map) {
+      return m.DEVICE_TO_ROOM.get(deviceId) || null;
+    }
+    // Fallback: scan ROOM_TO_DEVICE
+    if (m.ROOM_TO_DEVICE instanceof Map) {
+      for (const [room, dev] of m.ROOM_TO_DEVICE.entries()) {
+        if (dev === deviceId) return room;
+      }
+    }
+    return null;
+  }
+
+  function handleMqttForAlerts(topic, payload) {
+    const sTopic = String(topic);
+
+    // ---- Occupancy: dt/dt-lab/<device>/count
+    let m = sTopic.match(/^dt\/dt-lab\/([^/]+)\/count$/);
+    if (m) {
+      let obj = null;
+      try { obj = JSON.parse(payload.toString()); } catch { return; }
+      if (!obj || typeof obj.room !== 'string') return;
+
+      const count = Number(obj.count);
+      if (!Number.isFinite(count)) return;
+
+      ingestOcc({
+        roomName: obj.room,
+        count,
+        ts: obj.t || Date.now()
+      });
+      return;
+    }
+
+    // ---- Env telemetry: dt/dt-lab/<device>/telemetry
+    m = sTopic.match(/^dt\/dt-lab\/([^/]+)\/telemetry$/);
+    if (m) {
+      const dev = m[1];
+      const room = roomFromDeviceId(dev);
+      if (!room) return;
+
+      let obj = null;
+      try { obj = JSON.parse(payload.toString()); } catch { return; }
+
+      const ts = obj.ts_ms || obj.ts || Date.now();
+      const fields = {};
+      if (obj.temp_f   != null) fields.temp_f   = Number(obj.temp_f);
+      if (obj.rh_pct   != null) fields.rh_pct   = Number(obj.rh_pct);
+      if (obj.tvoc_ppb != null) fields.tvoc_ppb = Number(obj.tvoc_ppb);
+      if (obj.eco2_ppm != null) fields.eco2_ppm = Number(obj.eco2_ppm);
+      if (typeof obj.light_on !== 'undefined') {
+        fields.light_on = !!obj.light_on;
+      }
+
+      ingestEnv({
+        roomName: room,
+        fields,
+        ts
+      });
+    }
+  }
+
+  let _mqttWired = false;
+  function ensureMqttBridge() {
+    if (_mqttWired) return;
+
+    const client = window.MQTT_CLIENT;
+    if (!client || typeof client.on !== 'function') {
+      // METRICS / PLUGS / RULES may not have created the client yet → retry
+      setTimeout(ensureMqttBridge, 1500);
+      return;
+    }
+
+    _mqttWired = true;
+    client.on('message', (topic, payload) => {
+      try {
+        handleMqttForAlerts(topic, payload);
+      } catch (e) {
+        console.warn('[ALERTS] MQTT handler error', e);
+      }
+    });
+
+    console.log('[ALERTS] MQTT bridge attached');
+  }
+
+  // Kick off the bridge once this module loads
+  ensureMqttBridge();
+
   // ---------------------------------------------------------------------------
   // Evaluation
   // Alert conditions (Option A: groups of tests)

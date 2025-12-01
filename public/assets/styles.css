@@ -1,3 +1,12 @@
+/* GLOBAL FONT RESET */
+html, body {
+  font-family: "Lato", sans-serif !important;
+}
+
+/* Ensure all elements inherit the global font */
+*, *::before, *::after {
+  font-family: inherit !important;
+}
 /* Layout */
 html, body, #viewer { margin:0; padding:0; width:100%; height:100%; overflow:hidden; }
 
@@ -320,3 +329,15 @@ html, body, #viewer { margin:0; padding:0; width:100%; height:100%; overflow:hid
 .dpb-clock { font:700 16px/1.1 system-ui,sans-serif; color:#e2e8f0; }
 .dpb-rangeInfo { font:12px/1.2 system-ui; color:#94a3b8; }
 .dpb-scrub { width:100%; accent-color:#0ea5e9; }
+
+.badge {
+  display:inline-block;
+  min-width:16px;
+  padding:2px 5px;
+  margin-left:6px;
+  border-radius:999px;
+  background:#7b1e1e;
+  color:#fff;
+  font-size:11px;
+  text-align:center;
+}
