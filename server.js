@@ -757,15 +757,45 @@ from(bucket: "${INFLUX_BUCKET}")
 
 const admin = require('firebase-admin');
 
-// Initialize Firebase only once
+// --- Firebase Admin initialization (Render-safe) ---
+
+const {
+  FB_PROJECT_ID,
+  FB_CLIENT_EMAIL,
+  FB_PRIVATE_KEY,
+  FB_DB_URL,
+} = process.env;
+
+// Basic sanity check so we fail with a clear error
+if (!FB_PROJECT_ID || !FB_CLIENT_EMAIL || !FB_PRIVATE_KEY || !FB_DB_URL) {
+  console.error("Missing one or more Firebase env vars:", {
+    FB_PROJECT_ID: !!FB_PROJECT_ID,
+    FB_CLIENT_EMAIL: !!FB_CLIENT_EMAIL,
+    FB_PRIVATE_KEY: !!FB_PRIVATE_KEY,
+    FB_DB_URL: !!FB_DB_URL,
+  });
+  throw new Error("Firebase environment variables are not fully set.");
+}
+
+// Some platforms wrap the key in extra quotes; strip them if present
+let privateKey = FB_PRIVATE_KEY.trim();
+if (
+  (privateKey.startsWith('"') && privateKey.endsWith('"')) ||
+  (privateKey.startsWith("'") && privateKey.endsWith("'"))
+) {
+  privateKey = privateKey.slice(1, -1);
+}
+
+// Convert literal "\n" sequences into real newlines
+privateKey = privateKey.replace(/\\n/g, "\n");
+
 admin.initializeApp({
   credential: admin.credential.cert({
-    projectId:   process.env.FB_PROJECT_ID,
-    clientEmail: process.env.FB_CLIENT_EMAIL,
-    // Convert "\n" in .env to real line breaks
-    privateKey:  process.env.FB_PRIVATE_KEY.replace(/\\n/g, '\n'),
+    projectId:   FB_PROJECT_ID,
+    clientEmail: FB_CLIENT_EMAIL,
+    privateKey:  privateKey,
   }),
-  databaseURL: process.env.FB_DB_URL,
+  databaseURL: FB_DB_URL,
 });
 
 // Get a database reference AFTER initializeApp
