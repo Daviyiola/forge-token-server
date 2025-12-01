@@ -45,8 +45,16 @@ drawerNav.addEventListener('click', (e)=>{
   window.dispatchEvent(new Event('open:dayPlayback'));
   return;
 }
-  if (key === 'rules')    openPopup('Rules', '<p>Define or edit rules for alerts, automations, and thresholds.</p>');
-  if (key === 'alerts')   openPopup('Alerts', '<p>Recent alerts table with filters.</p>');
+  if (key === 'heatmap') { window.dispatchEvent(new Event('open:heatmap'));    return; }
+  if (key === 'rules') {
+  window.dispatchEvent(new Event('open:rules'));
+  return;
+}
+
+  if (key === 'alerts') {
+  window.dispatchEvent(new Event('open:alerts'));
+  return;
+};
   if (key === 'summaries')openPopup('Summaries', '<p>Daily/weekly summaries, KPIs, and statistics.</p>');
 });
 

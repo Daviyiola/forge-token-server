@@ -10,7 +10,7 @@
 </head>
 <body>
   <!-- Viewer -->
-  <div id="viewer" data-urn="urn:dXJuOmFkc2sub2JqZWN0czpvcy5vYmplY3Q6d3doX2RpZ2l0YWxfdHdpbl9sYWIvV1dIX0xhYl8wMTUucnZ0"></div>
+  <div id="viewer" data-urn="urn:dXJuOmFkc2sub2JqZWN0czpvcy5vYmplY3Q6ZXRzdV93d2hfZGlnaXRhbF90d2luX2NsYXNzcm9vbXMvZGlnaXRhbF9sYWJfbW9kZWxfd3doXzMucnZ0"></div>
 
   <!-- Floating selection menu (viewer-driven) -->
   <div id="selMenu" aria-live="polite">
@@ -47,6 +47,7 @@
       <button class="nav-item" data-open="rules">Rules</button>
       <button class="nav-item" data-open="alerts">Alerts</button>
       <button class="nav-item" data-open="summaries">Summaries</button>
+      <button class="nav-item" data-open="heatmap">Heatmap</button>
     </nav>
   </aside>
 
@@ -87,10 +88,24 @@
   <!-- Metrics dock (default hidden/compact) -->
 <div id="metricsDock" class="compact" aria-live="polite">
   <div class="hdr">
+  <div class="titleWrap">
+    
+    <!-- Room switcher button -->
+    <button
+      id="mxRoomSwitch"
+      type="button"
+      title="Change room"
+      aria-label="Change room"
+    >
+      ≡
+    </button>
     <div class="title">Lab Sensors</div>
-    <div class="updated" id="mxUpdated">—</div>
-    <button id="toggleMetrics" type="button" aria-expanded="false">Show</button>
+    <!-- Room list menu (populated by JS) -->
+    <div id="mxRoomMenu" hidden></div>
   </div>
+  <div class="updated" id="mxUpdated">—</div>
+  <button id="toggleMetrics" type="button" aria-expanded="false">Show</button>
+</div>
   <div class="body" id="mxBody">
     <div class="grid">
       <div class="mcard" id="mTemp">
@@ -159,5 +174,13 @@
   <script type="module" src="/js/live_data_viewer.js"></script>
   <script type="module" src="/js/day_playback.js"></script>
   <script type="module" src="/js/day_playback_ui.js"></script>
+  <link rel="stylesheet" href="/assets/heatmap.css" />
+  <script type="module" src="/js/heatmap.js"></script>
+  <script type="module" src="/js/heatmap_ui.js"></script>
+  <script type="module" src="/js/rules.js"></script>
+  <script type="module" src="/js/rules_ui.js"></script>
+  <script type="module" src="/js/alerts.js"></script>
+  <script type="module" src="/js/alerts_ui.js"></script>
+
 </body>
 </html>

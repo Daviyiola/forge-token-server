@@ -27,11 +27,54 @@
     await loadScriptOnce('https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js');
     await loadScriptOnce('https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3');
   }
+  // ---- Make metric tiles clickable to open history
+  function hookMetricClicks() {
+    // Map card IDs → metric field names
+    const map = {
+      mTemp: { metric: 'temp_f' },
+      mHum:  { metric: 'rh_pct' },
+      mTvoc: { metric: 'tvoc_ppb' },
+      mEco2: { metric: 'eco2_ppm' },
+      mOcc:  { metric: 'count' }
+    };
+
+    Object.entries(map).forEach(([id, cfg]) => {
+      const card = document.getElementById(id);
+      if (!card) return;
+
+      // make the whole card feel clickable
+      card.style.cursor = 'pointer';
+
+      card.addEventListener('click', () => {
+        const m = window.METRICS || {};
+        const roomName =
+          (typeof m.getPrimaryRoomName === 'function' && m.getPrimaryRoomName()) ||
+          (Array.isArray(m.ROOMS_LIST) && m.ROOMS_LIST.length ? m.ROOMS_LIST[0] : null);
+
+        window.dispatchEvent(
+          new CustomEvent('openHistoryForMetric', {
+            detail: { metric: cfg.metric, roomName }
+          })
+        );
+      });
+    });
+  }
+
+  // Ensure we hook **after** DOM is ready so cards exist
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', hookMetricClicks, { once: true });
+  } else {
+    hookMetricClicks();
+  }
+
+
 
   // ---- Fallback mappings (only used if your modules don't expose theirs)
   const FALLBACK_SENSOR_DBID_TO_DEVICE = new Map([[2350, 'dtn-e41358088304']]);
   const FALLBACK_PLUG_DBID_TO_DEVICES  = new Map([[2244, ['dtn-12e7df']]]);
-  const FALLBACK_LIGHT_DEVICE_TO_DBIDS = new Map([['dtn-e41358088304', [2394, 2396]]]);
+  const FALLBACK_LIGHT_DEVICE_TO_DBIDS = new Map([['dtn-e41358088304', [2394, 2396, 2395, 2392, 2390, 2393]],
+   ['dtn-d0bdbf0b65f4', [2961, 2962, 2963, 2964, 2965, 2966]],
+  ['dtn-a01cbf0b65f4', [3078, 3079, 3080, 3081, 3082, 3083]]]);
   const FALLBACK_DBID_TO_ROOM          = new Map([]); // fill if needed
 
   function resolveDevicesFor({ category, dbId }) {
@@ -290,9 +333,279 @@
   }
 
   // --- query + draw core (uses overlay, supports tagKey)
-  async function queryAndDrawExec({
+ // --- query + draw core (uses overlay, supports tagKey + occupancy bar mode)
+async function queryAndDrawExec({
+  category,
+  device,
+  field,
+  minutes,
+  startISO,
+  stopISO,
+  every,
+  canvas,
+  overlay,
+  tagKey,
+  agg
+}) {
+  const setOverlay = (msg = 'Loading…', show = true) => {
+    if (!overlay) return;
+    overlay.style.display = show ? 'flex' : 'none';
+    const msgEl = overlay.querySelector('.ldv-msg');
+    if (msgEl) msgEl.textContent = msg || '';
+  };
+
+  setOverlay('Loading…', true);
+
+  const url = buildQuery({ category, device, field, minutes, startISO, stopISO, every, tagKey, agg });
+  let json;
+  try {
+    const res = await fetch(url, { cache: 'no-store' });
+    json = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(json?.error || 'Query failed');
+  } catch (e) {
+    setOverlay(`Error: ${e.message || e}`, true);
+    setTimeout(() => setOverlay('', false), 1800);
+    const old = window.Chart && window.Chart.getChart(canvas);
+    if (old) old.destroy();
+    return;
+  }
+
+  // Normalise plug energy if needed
+  if (category === 'plug' && field === 'energy_wh') {
+    json.series = normalizeEnergy(json.series);
+  }
+
+  const series = json.series || {};
+  const domain = domainFromSeries(series) || domainFromRequest({ minutes, startISO, stopISO });
+
+  // If no data at all
+  const hasAny = Object.values(series || {}).some(arr => (arr || []).length > 0);
+  if (!hasAny) {
+    setOverlay('No data for this selection.', true);
+    const old = window.Chart && window.Chart.getChart(canvas);
+    if (old) old.destroy();
+    return;
+  }
+
+  // Occupancy mode: room count as bar chart
+  const isOcc = (category === 'room' && field === 'count');
+
+  const datasets = datasetsFrom(series, field);
+
+  if (isOcc) {
+    // Make the bars visible and nice
+    datasets.forEach(ds => {
+      ds.type = 'bar';
+      ds.backgroundColor = 'rgba(56, 189, 248, 0.7)'; // cyan-ish
+      ds.borderColor = 'rgba(56, 189, 248, 1)';
+      ds.borderWidth = 0;
+      // for bars, we do not need line tension or points, but they are ignored anyway
+    });
+  }
+
+  const old = window.Chart && window.Chart.getChart(canvas);
+  if (old) old.destroy();
+
+  const ctx = canvas.getContext('2d');
+  const chartType = isOcc ? 'bar' : 'line';
+
+  const chart = new Chart(ctx, {
+    type: chartType,
+    data: { datasets },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      parsing: false,
+      animation: false,
+      plugins: {
+        legend: {
+          display: true,
+          labels: { boxWidth: 14, usePointStyle: !isOcc }
+        },
+        title: {
+          display: false
+        },
+        // For non-occupancy we keep LTTB decimation. For occupancy we turn it off.
+        decimation: isOcc
+          ? { enabled: false }
+          : { enabled: true, algorithm: 'lttb', samples: 20 },
+        tooltip: {
+          mode: 'index',
+          intersect: false,
+          callbacks: {
+            label: (ctx) => {
+              const v = ctx.parsed.y;
+              if (v == null || Number.isNaN(v)) return '';
+              // Nice label for occupancy counts
+              if (field === 'count') {
+                const n = Math.round(v);
+                return `${ctx.dataset.label}: ${n} ${n === 1 ? 'person' : 'people'}`;
+              }
+              return `${ctx.dataset.label}: ${v}`;
+            }
+          }
+        }
+      },
+      scales: {
+        x: {
+          type: 'time',
+          time: { tooltipFormat: 'MMM d, HH:mm' },
+          adapters: {},
+          min: domain?.min || undefined,
+          max: domain?.max || undefined,
+          ticks: { maxRotation: 0, autoSkip: true }
+        },
+        y: {
+          beginAtZero: isOcc ? true : false,
+          ticks: {
+            // Let Chart.js pick good ticks; we just ensure ints for occupancy
+            callback: (val) => {
+              if (isOcc) return Number(val).toFixed(0);
+              return val;
+            }
+          }
+        }
+      },
+      elements: {
+        point: {
+          radius: isOcc ? 0 : 0,
+          hoverRadius: isOcc ? 0 : 3,
+          hitRadius: 6
+        },
+        line: {
+          borderWidth: 1.6,
+          tension: 0.2
+        }
+      }
+    }
+  });
+
+  // Remember last request for CSV export
+  canvas._lastReq = { category, device, field, minutes, startISO, stopISO, every, tagKey, agg };
+
+  setOverlay('', false);
+}
+  
+  // Open history when clicking a metric tile (room-aware)
+window.addEventListener('openHistoryForMetric', async (ev) => {
+  const { metric, roomName: rawRoom } = ev.detail || {};
+  if (!metric) return;
+
+  const m = window.METRICS || {};
+
+  // 1) Resolve room (explicit → primary → first in list)
+  let roomName =
+    rawRoom ||
+    (typeof m.getPrimaryRoomName === 'function' && m.getPrimaryRoomName()) ||
+    (Array.isArray(m.ROOMS_LIST) && m.ROOMS_LIST.length ? m.ROOMS_LIST[0] : null);
+
+  if (!roomName) {
+    console.warn('openHistoryForMetric: no roomName available');
+    return;
+  }
+
+  // Decide what we're charting
+  const isOcc = (metric === 'count');
+  const category = isOcc ? 'room' : 'sensor';
+
+  let device;      // what goes into the "device" param for /api/series
+  //let tagKey;      // optional tag key (for rooms)
+ // let agg;         // optional aggregation (for rooms)
+ let tagKey = (category === 'room') ? 'room' : undefined;
+ let agg    = (category === 'room') ? 'max'  : undefined;
+
+  if (category === 'sensor') {
+    // Map room → deviceId via METRICS.ROOM_TO_DEVICE (env sensors)
+    const dev =
+      m.ROOM_TO_DEVICE && typeof m.ROOM_TO_DEVICE.get === 'function'
+        ? m.ROOM_TO_DEVICE.get(roomName)
+        : null;
+
+    if (!dev) {
+      console.warn('openHistoryForMetric: no device mapped for room', roomName);
+      return;
+    }
+    device = dev;
+  } else {
+    // Room-based occupancy — treat room name as "device" + group by tagKey=room
+    device = roomName;
+    tagKey = 'room';
+    agg    = 'max';   // e.g., max count per bucket
+  }
+
+  await ensureChartJs();
+  const dom = openPopup();
+  if (!dom) return;
+
+  // Make popup tall + column layout
+  const popup = document.querySelector('#popupMask .popup');
+  if (popup) {
+    popup.style.height = '70vh';
+    popup.style.display = 'flex';
+    popup.style.flexDirection = 'column';
+  }
+  const body = document.querySelector('#popupBody');
+  if (body) {
+    body.style.display = 'flex';
+    body.style.flexDirection = 'column';
+    body.style.gap = '8px';
+    body.style.height = '100%';
+  }
+
+   const devices = [device];
+  const defaultDevice = device;
+  dom.title.textContent = `${roomName} • ${defaultDevice} — Live Data`;
+
+   const {
+    root,
+    metricSel,
+    devSel,
+    presetButtons,
+    startInp,
+    stopInp,
+    applyBtn,
+    dlBtn,
+    canvas,
+    overlay
+  } = buildUI({ devices, defaultDevice, category });
+
+  dom.body.innerHTML = '';
+  dom.body.appendChild(root);
+
+  // Preselect the clicked metric if available AND compute a human label
+  const defs = METRICS_BY_CATEGORY[category] || [];
+  let metricLabel = metric;  // fallback
+
+  if (defs.length) {
+    const def = defs.find(d => d.field === metric) || defs[0];
+    metricSel.value = def.field;
+    metricLabel = def.label || def.field;
+  }
+
+  const getDevice = () => (devSel ? devSel.value : defaultDevice);
+  const getField  = () => metricSel.value;
+  const setActivePreset = (btn) =>
+    presetButtons.forEach(b => b.classList.toggle('active', b === btn));
+
+  async function queryAndDraw({ minutes = '60', startISO = null, stopISO = null } = {}) {
+  const field = getField();
+  const isOccField = (category === 'room' && field === 'count');
+
+  // Use smart bucket sizing for both:
+  // - env sensors: target ~20 points
+  // - occupancy:   target ~50 bars
+  const every = pickEvery({
+    minutes,
+    startISO,
+    stopISO,
+    targetPts: isOccField ? 50 : 20
+  });
+
+  dom.title.textContent = `${getDevice()} — ${metricLabel}`;
+
+  await queryAndDrawExec({
     category,
-    device,
+    device: getDevice(),
     field,
     minutes,
     startISO,
@@ -300,117 +613,71 @@
     every,
     canvas,
     overlay,
-    tagKey, 
+    tagKey,
     agg
-  }) {
-    const setOverlay = (msg = 'Loading…', show = true) => {
-      if (!overlay) return;
-      overlay.style.display = show ? 'flex' : 'none';
-      const msgEl = overlay.querySelector('.ldv-msg');
-      if (msgEl) msgEl.textContent = msg || '';
-    };
+  });
+}
 
-    setOverlay('Loading…', true);
 
-    const url = buildQuery({ category, device, field, minutes, startISO, stopISO, every, tagKey, agg });
-    let json;
+  // Presets
+  presetButtons.forEach(btn =>
+    btn.addEventListener('click', () => {
+      const mins = Number(btn.dataset.minutes);
+      const end = new Date();
+      const start = new Date(end.getTime() - mins * 60_000);
+      startInp.value = toLocalInputValue(start);
+      stopInp.value  = toLocalInputValue(end);
+      setActivePreset(btn);
+      queryAndDraw({ minutes: String(mins) });
+    })
+  );
+
+  // React to metric changes
+  metricSel.addEventListener('change', () => queryAndDraw());
+  if (devSel) devSel.addEventListener('change', () => queryAndDraw());
+
+  // Apply custom range
+  applyBtn.addEventListener('click', () => {
+    const s = startInp.value ? new Date(startInp.value) : null;
+    const e = stopInp.value  ? new Date(stopInp.value)  : null;
+    if (!s || !e || isNaN(s) || isNaN(e) || e <= s) {
+      overlay.style.display = 'flex';
+      overlay.querySelector('.ldv-msg').textContent = 'Pick a valid start and stop.';
+      setTimeout(() => { overlay.style.display = 'none'; }, 1600);
+      return;
+    }
+    setActivePreset(null);
+    queryAndDraw({ minutes: null, startISO: s.toISOString(), stopISO: e.toISOString() });
+  });
+
+  // CSV download
+  if (dlBtn) dlBtn.addEventListener('click', async () => {
     try {
-      const res = await fetch(url, { cache: 'no-store' });
-      json = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(json?.error || 'Query failed');
+      overlay.style.display = 'flex';
+      overlay.querySelector('.ldv-msg').textContent = 'Preparing CSV…';
+      await downloadRawCSV(canvas);
+      overlay.style.display = 'none';
     } catch (e) {
-      setOverlay(`Error: ${e.message || e}`, true);
-      setTimeout(() => setOverlay('', false), 1800);
-      const old = window.Chart && window.Chart.getChart(canvas);
-      if (old) old.destroy();
-      return;
+      overlay.querySelector('.ldv-msg').textContent = `CSV error: ${e.message || e}`;
+      setTimeout(() => { overlay.style.display = 'none'; }, 1500);
     }
+  });
 
-    if (category === 'plug' && field === 'energy_wh') {
-      json.series = normalizeEnergy(json.series);
-    }
-
-    const series = json.series || {};
-    const fields = Object.keys(series);
-
-    canvas._lastReq = { category, device, field, minutes, startISO, stopISO, tagKey, agg };
-    canvas._lastSeriesJson = json;
-
-    if (fields.length === 0) {
-      const old = window.Chart && window.Chart.getChart(canvas);
-      if (old) old.destroy();
-      new Chart(canvas.getContext('2d'), {
-        type: 'line',
-        data: { datasets: [] },
-        options: {
-          responsive: true,
-          maintainAspectRatio: false,
-          plugins: { title: { display: true, text: 'No data in range' } },
-          scales: { x: { type: 'time' } }
-        }
-      });
-      setOverlay('No data in range.', true);
-      setTimeout(() => setOverlay('', false), 1200);
-      return;
-    }
-
-    const datasets = datasetsFrom(series, field);
-
-    let dom = domainFromRequest({ minutes, startISO, stopISO });
-    if (!dom) dom = domainFromSeries(series);
-
-    const existing = window.Chart && window.Chart.getChart(canvas);
-    if (existing) existing.destroy();
-
-    new Chart(canvas.getContext('2d'), {
-      type: 'line',
-      data: { datasets },
-      options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        animation: { duration: 140 },
-        parsing: false,
-        spanGaps: true,
-        interaction: { mode: 'nearest', intersect: false },
-        plugins: {
-          legend: { position: 'top', labels: { boxWidth: 10, boxHeight: 10 } },
-          title: { display: false },
-          decimation: { enabled: true, algorithm: 'lttb', samples: 20 },
-          tooltip: {
-            callbacks: {
-              label: (c) => {
-                const y = c.parsed?.y;
-                const n = (typeof y === 'number') ? y : null;
-                if (field === 'count') return `${c.dataset.label}: ${n != null ? (n === 1 ? '1 person' : `${n} people`) : y}`;
-                return `${c.dataset.label}: ${typeof y === 'number' ? y.toFixed(3) : y}`;
-              }
-            }
-          }
-        },
-        scales: {
-          x: {
-            type: 'time',
-            time: { tooltipFormat: 'MMM d, HH:mm' },
-            ...(dom ? { min: dom.min, max: dom.max } : {}),
-            ticks: { source: 'auto', color: 'rgba(255,255,255,.75)' },
-            grid: { color: 'rgba(255,255,255,.06)' }
-          },
-          y: {
-            beginAtZero: false,
-            ticks: { color: 'rgba(255,255,255,.75)' },
-            grid: { color: 'rgba(255,255,255,.06)' }
-          }
-        },
-        layout: { padding: { top: 6, right: 6, bottom: 0, left: 0 } },
-        elements: {
-          point: { radius: 0, hoverRadius: 3, hitRadius: 6 },
-          line: { borderWidth: 1.6, tension: 0.2 }
-        }
-      }
+  // Initial load: 1h
+  {
+    const end = new Date();
+    const start = new Date(end.getTime() - 60 * 60_000);
+    startInp.value = toLocalInputValue(start);
+    stopInp.value  = toLocalInputValue(end);
+    if (presetButtons[0]) setActivePreset(presetButtons[0]);
+    queryAndDraw({ minutes: '60' }).catch(err => {
+      overlay.style.display = 'flex';
+      overlay.querySelector('.ldv-msg').textContent = `Error: ${err?.message || err}`;
     });
-
-    setOverlay('', false);
   }
+});
+
+
 
   // ---- Event wiring
   window.addEventListener('openLiveData', async (ev) => {

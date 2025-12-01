@@ -29,12 +29,14 @@ const METRICS = (() => {
   // Optional mapping from dbId -> room name (fill as needed)
   // If you later want to set primary room from a model selection, populate this.
   const DBID_TO_ROOM = new Map([
-    [2348, 'WWH015'],
+    [3084, 'WWH015'],
+    [3063, 'WWH016'],
+    [3065, 'WWH017'],
     // [2396, 'WWH016'],
   ]);
 
   // Consider occupancy "stale" after 6 hours with no message
-  const OCC_CLEAR_AFTER_MS = 24 * 60 * 60 * 1000; // 24h
+  const OCC_CLEAR_AFTER_MS = 72 * 60 * 60 * 1000; // 24h
 
   let primaryRoomName = null;
   try {
@@ -53,6 +55,7 @@ const METRICS = (() => {
     try { localStorage.setItem(KEY_PRIMARY_ROOM, room); } catch {}
     setUpdatedFromMs(Date.now());
     renderDock();
+    hookMetricClicks();
     return true;
   }
   function setPrimaryRoomByName(room) {
@@ -61,6 +64,8 @@ const METRICS = (() => {
     try { localStorage.setItem(KEY_PRIMARY_ROOM, room); } catch {}
     setUpdatedFromMs(Date.now());
     renderDock();
+    hookMetricClicks();
+    updateTitle();
     return true;
   }
 
@@ -95,6 +100,14 @@ const METRICS = (() => {
   function setUpdatedFromMs(ms) {
     const label = ms ? `Last updated at ${formatFullStamp(ms)}` : 'Last updated at —';
     el.updated.textContent = label;
+  }
+    function updateTitle() {
+    if (!el.dock) return;
+    const titleEl = el.dock.querySelector('.title');
+    if (!titleEl) return;
+
+    const room = primaryRoomName || DEFAULT_PRIMARY_ROOM;
+    titleEl.textContent = room ? `${room} Lab sensors` : 'Lab Sensors';
   }
 
   function formatPeople(n) {
@@ -132,9 +145,78 @@ const METRICS = (() => {
 
   /* ---------- dbId <-> sensor device mapping ---------- */
   const DBID_TO_DEVICE = new Map([
-    [2350, 'dtn-e41358088304'],    
+    [2339, 'dtn-e41358088304'],    
+    [3061, 'dtn-d0bdbf0b65f4'],
+    [3067, 'dtn-a01cbf0b65f4'],
     // add more: [dbid, 'device-id'],
   ]);
+
+  const DEVICE_TO_ROOM = new Map([
+  ['dtn-e41358088304', 'WWH015'],
+  ['dtn-d0bdbf0b65f4', 'WWH016'],
+  ['dtn-a01cbf0b65f4', 'WWH017'],
+  // ['your-other-device-id', 'ROOMNAME'],
+]);
+
+const ROOM_TO_DEVICE = new Map();
+DEVICE_TO_ROOM.forEach((room, deviceId) => {
+  if (!room || !deviceId) return;
+  if (!ROOM_TO_DEVICE.has(room)) ROOM_TO_DEVICE.set(room, deviceId);
+});
+
+// Sorted list of rooms
+const ROOMS_LIST = Array.from(ROOM_TO_DEVICE.keys()).sort();
+
+  // ---------- Room switcher UI in the metrics dock ----------
+  (function setupRoomSwitcher() {
+    const dock = el.dock;
+    const btn  = document.getElementById('mxRoomSwitch');
+    const menu = document.getElementById('mxRoomMenu');
+    if (!dock || !btn || !menu) return;
+
+    if (!ROOMS_LIST.length) {
+      btn.style.display = 'none';
+      return;
+    }
+
+    // Populate room list
+    menu.innerHTML = '';
+    ROOMS_LIST.forEach((room) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = room;
+      b.addEventListener('click', () => {
+        // Set primary device for that room (if known)
+        const dev = ROOM_TO_DEVICE.get(room);
+        if (dev) {
+          primaryDeviceId = dev;
+          try { localStorage.setItem('primary_sensor_device', dev); } catch {}
+        }
+
+        // Set primary room + re-render
+        setPrimaryRoomByName(room);
+        menu.hidden = true;
+      });
+      menu.appendChild(b);
+    });
+
+    // Toggle menu open/close
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      menu.hidden = !menu.hidden;
+    });
+
+    // Close on outside click
+    document.addEventListener('click', (e) => {
+      if (!menu.hidden && !dock.contains(e.target)) {
+        menu.hidden = true;
+      }
+    });
+
+    // Initial title
+    updateTitle();
+  })();
+
 
   const DEFAULT_PRIMARY_DBID = 2350;
 
@@ -154,15 +236,43 @@ const METRICS = (() => {
   function getDeviceByDbId(dbId) {
     return DBID_TO_DEVICE.get(Number(dbId)) || null;
   }
-  function setPrimaryByDbId(dbId) {
-    const dev = getDeviceByDbId(dbId);
-    if (!dev) { console.warn('No device mapping for dbId', dbId); return false; }
-    primaryDeviceId = dev;
-    try { localStorage.setItem('primary_sensor_device', dev); } catch {}
+    function setPrimaryRoomByDbId(dbId) {
+    const room = getRoomByDbId(dbId);
+    if (!room) { console.warn('No room mapping for dbId', dbId); return false; }
+    primaryRoomName = room;
+    try { localStorage.setItem(KEY_PRIMARY_ROOM, room); } catch {}
     setUpdatedFromMs(Date.now());
     renderDock();
+    hookMetricClicks();
+    updateTitle();
     return true;
   }
+
+    function setPrimaryByDbId(dbId) {
+    const dev = getDeviceByDbId(dbId);
+    if (!dev) { console.warn('No device mapping for dbId', dbId); return false; }
+
+    primaryDeviceId = dev;
+    try { localStorage.setItem('primary_sensor_device', dev); } catch {}
+
+    // If this device is mapped to a room, keep room + title in sync
+    const mappedRoom = DEVICE_TO_ROOM.get(dev);
+    if (mappedRoom) {
+      primaryRoomName = mappedRoom;
+      try { localStorage.setItem(KEY_PRIMARY_ROOM, mappedRoom); } catch {}
+    }
+
+    setUpdatedFromMs(Date.now());
+    renderDock();
+    hookMetricClicks();
+    updateTitle();
+    return true;
+  }
+    function getPrimaryRoomName() {
+    return primaryRoomName;
+  }
+
+
 
   /* ---------- Live state + MQTT ---------- */
   let client = null;
@@ -210,8 +320,70 @@ const METRICS = (() => {
     setValDot(el.occVal, el.occDot, formatPeople(occVal), classify('occ', occVal));
   }
 
+  function hookMetricClicks() {
+  const map = {
+    mxTemp:  'temp_f',
+    mxRh:    'rh_pct',
+    mxTvoc:  'tvoc_ppb',
+    mxEco2:  'eco2_ppm',
+    mxLight: 'light_on'
+    // DO NOT include occupancy here – it has its own popup
+  };
+
+  Object.entries(map).forEach(([id, metric]) => {
+    const node = document.getElementById(id);
+    if (!node) return;
+
+    const card = node.closest('.mcard');
+    if (!card) return;
+
+    card.style.cursor = 'pointer';
+
+    card.addEventListener('click', () => {
+      const roomName =
+        METRICS.getPrimaryRoomName?.() ||
+        (METRICS.ROOMS_LIST?.length ? METRICS.ROOMS_LIST[0] : null);
+
+      window.dispatchEvent(
+        new CustomEvent('openHistoryForMetric', {
+          detail: { metric, roomName }
+        })
+      );
+    });
+  });
+
+    // ---- Occupancy tile → its own history popup (room-based)
+  const occNode = document.getElementById('mxOcc'); // wrapper for the occ metric
+  if (occNode) {
+    const card = occNode.closest('.mcard');
+    if (card && !card.__occHooked) {
+      card.__occHooked = true;
+      card.style.cursor = 'pointer';
+
+      card.addEventListener('click', () => {
+        const roomName =
+          METRICS.getPrimaryRoomName?.() ||
+          (METRICS.ROOMS_LIST?.length ? METRICS.ROOMS_LIST[0] : null);
+
+        if (!roomName) {
+          console.warn('No roomName for occupancy history');
+          return;
+        }
+
+        window.dispatchEvent(
+          new CustomEvent('openHistoryForMetric', {
+            detail: { metric: 'count', roomName }
+          })
+        );
+      });
+    }
+  }
+}
+
+
   function scheduleRender(tsMs = null) {
     renderDock();
+    hookMetricClicks();
     setUpdatedFromMs(tsMs || Date.now());
   }
 
@@ -279,6 +451,7 @@ const METRICS = (() => {
 
         if (room === primaryRoomName) {
           renderDock();
+          hookMetricClicks();
           setUpdatedFromMs(ts);
         }
         return;
@@ -301,6 +474,7 @@ const METRICS = (() => {
 
       if (dev === primaryDeviceId) {
         renderDock();
+        hookMetricClicks();
         setUpdatedFromMs(ms);
       }
     });
@@ -309,6 +483,7 @@ const METRICS = (() => {
   // Boot + initial paint
   bootMqtt().then(() => {
     renderDock();
+    hookMetricClicks();
     setUpdatedFromMs(null);
   });
 
@@ -391,22 +566,31 @@ const METRICS = (() => {
     setPlaybackActive(playing);
   });
 
-  /* ---------- Public API ---------- */
-  const api = {
+/* ---------- Public API (Extended) ---------- */
+const api = {
     // sensor
     setPrimaryByDbId,
     getDeviceByDbId,
     DBID_TO_DEVICE,
+
     // room
     setPrimaryRoomByDbId,
     setPrimaryRoomByName,
     getRoomByDbId,
-    DBID_TO_ROOM
+    DBID_TO_ROOM,
+
+    // sensor ↔ room maps
+    DEVICE_TO_ROOM,
+    ROOM_TO_DEVICE,
+    ROOMS_LIST,
+
+    // helpers
+    getPrimaryRoomName,
   };
 
-  // Merge (do not clobber) any previous METRICS
   window.METRICS = Object.assign(window.METRICS || {}, api);
   return window.METRICS;
 })();
 
 export default METRICS;
+

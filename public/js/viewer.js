@@ -3,9 +3,9 @@
 // ==== CONFIG ====
 const FALLBACK_URN = 'urn:REPLACE_WITH_YOUR_URN';
 const DBIDS = {
-  plugs:   new Set([2263, 2264, 2185, 2249, 2231, 2232, 2214, 2193, 2254, 2237, 2218, 2219, 2267]),
-  sensors: new Set([2350,2348]),
-  lights:  new Set([2394, 2396, 2399, 2397, 2398, 2400])
+  plugs:   new Set([2263, 2265, 2185, 2249, 2231, 2232, 2214, 2193, 2254, 2237, 2218, 2219, 2267]),
+  sensors: new Set([2339, 3084, 3063, 3061, 3065, 3067]),
+  lights:  new Set([2394, 2396, 2395, 2392, 2390, 2393, 2961, 2962, 2963, 2964, 2965, 2966, 3078, 3079, 3080, 3081, 3082, 3038])
 };
 
 // ==== TOKEN ====
@@ -272,6 +272,41 @@ if (category === 'plug') {
   offBtn.className = 'btn'; offBtn.textContent = 'Turn Off';
   offBtn.onclick = () => { hideSelectionMenu(); window.PLUGS?.toggleRelay(dbId, false); };
   btns.appendChild(offBtn);
+
+  // Resolve a deviceId / name for rules payload (best-effort)
+  const devId = (() => {
+  const arr = window.PLUGS?.DBID_TO_DEVICES?.get?.(dbId);
+  return Array.isArray(arr) && arr.length ? arr[0] : null;
+})();
+
+// Simple label (you can customize later)
+const devName = devId ? devId : (`Plug ${dbId}`);
+
+  function openRules(mode) {
+    hideSelectionMenu();
+    const payload = { dbId, deviceId: devId, deviceName: devName, mode }; // mode: 'edit' | 'create'
+    const run = () => {
+      // Let rules_ui.js open the Rules popup + filter/prefill using this payload
+      window.dispatchEvent(new CustomEvent('openRulesForPlug', { detail: payload }));
+      // Also politely close the drawer if it’s open
+      try { document.getElementById('drawer')?.classList.remove('open'); } catch {}
+    };
+    // Auth-gate via your lock chip
+    if (window.AppAuth?.isAuthed?.()) run();
+    else window.AppAuth?.requireAuthThen?.(run);
+  }
+
+  const createRuleBtn = document.createElement('button');
+  createRuleBtn.className = 'btn';
+  createRuleBtn.textContent = 'Create rule';
+  createRuleBtn.onclick = () => openRules('create');
+  btns.appendChild(createRuleBtn);
+
+  // const editRulesBtn = document.createElement('button');
+  // editRulesBtn.className = 'btn';
+  // editRulesBtn.textContent = 'Edit rules';
+  // editRulesBtn.onclick = () => openRules('edit');
+  // btns.appendChild(editRulesBtn);
 } else {
   // non-plug categories keep original order
   const viewBtn = document.createElement('button');
