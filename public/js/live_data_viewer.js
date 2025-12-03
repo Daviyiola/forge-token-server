@@ -388,26 +388,30 @@ async function queryAndDrawExec({
   }
 
   // Occupancy mode: room count as bar chart
-  const isOcc = (category === 'room' && field === 'count');
+const isOcc = (category === 'room' && field === 'count');
 
-  const datasets = datasetsFrom(series, field);
+const datasets = datasetsFrom(series, field);
 
-  if (isOcc) {
-    // Make the bars visible and nice
-    datasets.forEach(ds => {
-      ds.type = 'bar';
-      ds.backgroundColor = 'rgba(56, 189, 248, 0.7)'; // cyan-ish
-      ds.borderColor = 'rgba(56, 189, 248, 1)';
-      ds.borderWidth = 0;
-      // for bars, we do not need line tension or points, but they are ignored anyway
-    });
-  }
+if (isOcc) {
+  datasets.forEach(ds => {
+    ds.type = 'line';
+    ds.borderColor = '#38bdf8';
+    ds.backgroundColor = 'transparent';
+    ds.borderWidth = 2;
+
+    // 🔥 KEY: force perfect 90-degree step transitions
+    ds.tension = 0;
+    ds.stepped = 'middle';
+
+    ds.pointRadius = 0;
+  });
+}
 
   const old = window.Chart && window.Chart.getChart(canvas);
   if (old) old.destroy();
 
   const ctx = canvas.getContext('2d');
-  const chartType = isOcc ? 'bar' : 'line';
+  const chartType = isOcc ? 'line' : 'line';
 
   const chart = new Chart(ctx, {
     type: chartType,
@@ -473,8 +477,9 @@ async function queryAndDrawExec({
           hitRadius: 6
         },
         line: {
-          borderWidth: 1.6,
-          tension: 0.2
+          borderWidth: isOcc ? 2 : 1.6,
+          tension: isOcc ? 0 : 0.2,
+          stepped: isOcc ? 'middle' : false
         }
       }
     }
