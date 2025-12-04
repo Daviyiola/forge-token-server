@@ -353,7 +353,7 @@ app.post('/api/heatmap_slice', async (req, res) => {
     const tagValues = rooms?.length ? rooms : devices;
     const allowTagFilter = ['device','room','dbId','site'].includes(tagStrategy);
 
-const fieldSet = (Array.isArray(M.f) ? M.f : [M.f]).map(s => `"${s}"`).join(', ');
+    const fieldSet = (Array.isArray(M.f) ? M.f : [M.f]).map(s => `"${s}"`).join(', ');
     const tagClause = (tagValues?.length && allowTagFilter)
       ? `|> filter(fn: (r) => contains(value: r.${tagStrategy}, set: [${tagValues.map(v => `"${String(v).replace(/"/g,'\\"')}"`).join(', ')}]))`
       : '';
@@ -361,14 +361,18 @@ const fieldSet = (Array.isArray(M.f) ? M.f : [M.f]).map(s => `"${s}"`).join(', '
     const needFill = (metric === 'occupancy'); // per-minute forward fill for seat-minutes
     const rangeLine = `|> range(start: time(v: "${start}"), stop: time(v: "${stop}"))`;
 
+    // NEW: group by measurement + room/device so entry/exit/reset share one series
+    const groupCol = (allowTagFilter ? tagStrategy : 'device');
+
     const flux = `
 from(bucket: "${INFLUX_BUCKET}")
   ${rangeLine}
   |> filter(fn: (r) => r._measurement == "${M.m}")
   ${tagClause}
   |> filter(fn: (r) => contains(value: r._field, set: [${fieldSet}]))
+  |> group(columns: ["_measurement","${groupCol}"])
   ${needFill ? '|> aggregateWindow(every: 1m, fn: last, createEmpty: true)\n  |> fill(usePrevious: true)' : ''}
-  |> keep(columns: ["_time","_field","_value","${allowTagFilter ? tagStrategy : 'device'}"])
+  |> keep(columns: ["_time","_field","_value","${groupCol}"])
   |> yield(name: "series")
 `.trim();
 
@@ -377,7 +381,7 @@ from(bucket: "${INFLUX_BUCKET}")
       _time: o._time,
       _value: Number(o._value),
       _field: o._field,
-      tag: o[allowTagFilter ? tagStrategy : 'device'] ?? null
+      tag: o[groupCol] ?? null
     }));
 
     // Energy: cumulative → deltas (Wh) then bin; convert to kWh after binning
@@ -391,7 +395,7 @@ from(bucket: "${INFLUX_BUCKET}")
                  : NaN;
         if (!Number.isFinite(vWh)) continue;
         if (!byDev.has(dev)) byDev.set(dev, []);
-          byDev.get(dev).push({ t: r._time, v: vWh });  
+        byDev.get(dev).push({ t: r._time, v: vWh });  
       }
       const deltas = [];
       for (const [dev, arr] of byDev) {
@@ -491,6 +495,7 @@ from(bucket: "${INFLUX_BUCKET}")
   }
 });
 
+
 // ==== HEATMAP API (contiguous window, ≤ 8 labels, budget-aware) ====
 app.post('/api/heatmap', async (req, res) => {
   try {
@@ -509,22 +514,22 @@ app.post('/api/heatmap', async (req, res) => {
         },
         matrix: {
           rows: 24, cols: 0,
-          hours: Array.from({length:24}, (_,i)=>i),
+          hours: Array.from({ length: 24 }, (_, i) => i),
           days: [],
-          values: Array.from({length:24}, ()=>[])
+          values: Array.from({ length: 24 }, () => [])
         },
         truncated: false,
         loadedDays: 0
       });
     }
 
-    // -------- Inputs
+    // -------- Inputs from body
     const {
       metric = 'co2',
       agg = 'auto',
       start,
       stop,
-      bin = '60m',            // not used in this stitcher but preserved
+      bin = '60m',            // kept for future use
       tagKey,
       devices = [],
       rooms = [],
@@ -532,7 +537,7 @@ app.post('/api/heatmap', async (req, res) => {
       pointBudget = 100_000
     } = req.body || {};
 
-    // -------- Metric map (same alignment used in /api/heatmap_slice)
+    // -------- Metric map (same as before)
     const METRIC_DEF = {
       temp:      { m: 'env',        f: ['temp_f'],                           unit: '°F',     defAgg: 'median',       label:'Temperature' },
       rh:        { m: 'env',        f: ['rh_pct'],                           unit: '%',      defAgg: 'median',       label:'Rel Humidity' },
@@ -545,176 +550,135 @@ app.post('/api/heatmap', async (req, res) => {
     };
     const M = METRIC_DEF[metric];
     if (!M) return res.status(400).json({ error: 'Unknown metric' });
+
     const AGG = (agg && agg !== 'auto') ? String(agg).toLowerCase() : M.defAgg;
 
-    // -------- Clamp range to ≤ 7 days span (→ ≤ 8 calendar labels)
+    // -------- Clamp range to at most 7 calendar days (today + previous 6)
     const DAY = 24 * 3600 * 1000;
+    const MAX_CAL_DAYS = 7;                  // max number of day-columns
+    const MAX_SPAN_MS  = MAX_CAL_DAYS * DAY; // <= 7 * 24h
+
     const E = stop ? new Date(stop) : new Date();
-    let S = start ? new Date(start) : new Date(E.getTime() - 7 * DAY);
-    if (E - S > 7 * DAY) S = new Date(E.getTime() - 7 * DAY);
+
+    // Default start: (E - 6 days at midnight) if caller does not specify
+    let S = start ? new Date(start) : new Date(E.getTime() - (MAX_CAL_DAYS - 1) * DAY);
+
+    // If caller requests a much wider span, clamp back, but allow up to 7*24h
+    if (E - S > MAX_SPAN_MS) {
+      S = new Date(E.getTime() - MAX_SPAN_MS);
+    }
 
     // -------- Filters
-    const tagStrategy = rooms?.length ? 'room' : (tagKey || 'device');
-    const tagValues   = rooms?.length ? rooms : devices;
+    const tagStrategy   = rooms?.length ? 'room' : (tagKey || 'device');
+    const tagValues     = rooms?.length ? rooms : devices;
     const allowTagFilter = ['device','room','dbId','site'].includes(tagStrategy);
-    const fieldSet = (Array.isArray(M.f) ? M.f : [M.f]).map(s => `"${s}"`).join(', ');
-    const tagClause = (tagValues?.length && allowTagFilter)
+    const fieldSet      = (Array.isArray(M.f) ? M.f : [M.f]).map(s => `"${s}"`).join(', ');
+    const tagClause     = (tagValues?.length && allowTagFilter)
       ? `|> filter(fn: (r) => contains(value: r.${tagStrategy}, set: [${tagValues.map(v => `"${String(v).replace(/"/g,'\\"')}"`).join(', ')}]))`
       : '';
 
-    // -------- Helpers
-    const fmtHour = new Intl.DateTimeFormat('en-US',{ timeZone: tz, hour:'2-digit', hour12:false });
-    const fmtDOW  = new Intl.DateTimeFormat('en-US',{ timeZone: tz, weekday:'short' });
-    const weekdayLabel = (d) => fmtDOW.format(d);
+    // -------- Formatting helpers for TZ
+    const fmtHour   = new Intl.DateTimeFormat('en-US', { timeZone: tz, hour: '2-digit', hour12: false });
+    const fmtDOW    = new Intl.DateTimeFormat('en-US', { timeZone: tz, weekday: 'short' });
+    const fmtDOM    = new Intl.DateTimeFormat('en-US', { timeZone: tz, day: '2-digit' });
+    const fmtDayKey = new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' });
+
+    // e.g. "Thu - 04"
+    const weekdayLabel = (d) => `${fmtDOW.format(d)} - ${fmtDOM.format(d)}`;
+
     const percentile = (arr, p) => {
       if (!arr.length) return null;
       const a = arr.slice().sort((x,y)=>x-y);
-      const idx = (p/100)*(a.length-1);
+      const idx = (p/100) * (a.length - 1);
       const lo = Math.floor(idx), hi = Math.ceil(idx);
       if (lo === hi) return a[lo];
       const t = idx - lo;
       return a[lo]*(1-t) + a[hi]*t;
     };
 
-    // -------- Stitch newest day first, walk backward
-    const MAX_LABELS = 8;
-    let cursorEnd = new Date(E);
-    let cursorStart = new Date(cursorEnd.getTime() - DAY);
-    let loaded = 0, totalPoints = 0, truncated = false;
+    const needFill = (metric === 'occupancy');
 
-    let grid = null;       // [24][N]
-    let days = [];
-    let unitOut = M.unit;
-    let vmin = Infinity, vmax = -Infinity;
+    // NEW: group by measurement + room/device so entry/exit/reset share one series
+    const groupCol = (allowTagFilter ? tagStrategy : 'device');
 
-    while (cursorEnd > S && loaded < MAX_LABELS) {
-      const needFill = (metric === 'occupancy'); // per-minute FF for seat-minutes
-      const flux = `
+    // -------- ONE Flux query for the whole window
+    const flux = `
 from(bucket: "${INFLUX_BUCKET}")
-  |> range(start: time(v: "${cursorStart.toISOString()}"), stop: time(v: "${cursorEnd.toISOString()}"))
+  |> range(start: time(v: "${S.toISOString()}"), stop: time(v: "${E.toISOString()}"))
   |> filter(fn: (r) => r._measurement == "${M.m}")
   ${tagClause}
   |> filter(fn: (r) => contains(value: r._field, set: [${fieldSet}]))
+  |> group(columns: ["_measurement","${groupCol}"])
   ${needFill ? '|> aggregateWindow(every: 1m, fn: last, createEmpty: true)\n  |> fill(usePrevious: true)' : ''}
-  |> keep(columns: ["_time","_field","_value","${allowTagFilter ? tagStrategy : 'device'}"])
+  |> keep(columns: ["_time","_field","_value","${groupCol}"])
   |> yield(name: "series")
 `.trim();
 
-      const rowsRaw = await queryApi.collectRows(flux);
-      let rows = rowsRaw.map(o => ({
-        _time: o._time,
-        _value: Number(o._value),
-        _field: o._field,
-        tag: o[allowTagFilter ? tagStrategy : 'device'] ?? null
-      }));
+    let rowsRaw = await queryApi.collectRows(flux);
+    let rows = rowsRaw.map(o => ({
+      _time: o._time,
+      _value: Number(o._value),
+      _field: o._field,
+      tag: o[groupCol] ?? null
+    }));
 
-      // Energy: cumulative -> deltas (Wh)
-      if (metric === 'energy') {
-        const byDev = new Map();
-        for (const r of rows) {
-          const dev = r.tag || 'unknown';
-          const vWh = (r._field === 'energy_wh') ? r._value
-                   : (r._field === 'energy_kwh') ? (r._value * 1000)
-                   : NaN;
-          if (!Number.isFinite(vWh)) continue;
-          if (!byDev.has(dev)) byDev.set(dev, []);
-          byDev.get(dev).push({ t: r._time, v: vWh });
-        }
-        const deltas = [];
-        for (const [dev, arr] of byDev) {
-          arr.sort((a,b) => new Date(a.t) - new Date(b.t));
-          for (let i=1;i<arr.length;i++){
-            const d = arr[i].v - arr[i-1].v;
-            if (d > 0 && Number.isFinite(d)) deltas.push({ _time: arr[i].t, _value: d, tag: dev });
+    // -------- Energy: convert cumulative → deltas in Wh
+    if (metric === 'energy') {
+      const byDev = new Map();
+      for (const r of rows) {
+        const dev = r.tag || 'unknown';
+        const vWh = (r._field === 'energy_wh') ? r._value
+                 : (r._field === 'energy_kwh') ? (r._value * 1000)
+                 : NaN;
+        if (!Number.isFinite(vWh)) continue;
+        if (!byDev.has(dev)) byDev.set(dev, []);
+        byDev.get(dev).push({ t: r._time, v: vWh });
+      }
+      const deltas = [];
+      for (const [dev, arr] of byDev) {
+        arr.sort((a,b) => new Date(a.t) - new Date(b.t));
+        for (let i = 1; i < arr.length; i++) {
+          const d = arr[i].v - arr[i-1].v;
+          if (d > 0 && Number.isFinite(d)) {
+            deltas.push({ _time: arr[i].t, _value: d, _field: 'energy_wh', tag: dev });
           }
         }
-        rows = deltas;
       }
-
-      // Bin to 24x1 column
-      const cells = Array.from({length:24}, () => ({ n:0, sum:0, max:-Infinity, vals:[] }));
-      const presenceThreshold = (metric === 'lights') ? 0.5 : 1;
-
-      for (const r of rows) {
-        const d = new Date(r._time);
-        const hh = Number(fmtHour.format(d));
-        if (Number.isNaN(hh)) continue;
-        const v = r._value;
-        if (v == null || Number.isNaN(v)) continue;
-        const c = cells[hh];
-        c.n += 1;
-        c.sum += v;
-        if (v > c.max) c.max = v;
-        c.vals.push(v);
-      }
-
-      let col = cells.map(c => {
-        if (c.n === 0) return null;
-
-        if (metric === 'occupancy') {
-          if (AGG === 'seat_minutes') return c.sum;
-          if (AGG === 'seat_hours')   return c.sum / 60;
-          if (AGG === 'max')          return c.max;
-          if (AGG === 'p95')          return percentile(c.vals,95);
-          return c.sum / c.n; // mean people
-        }
-
-        if (metric === 'lights' && AGG === 'presence_pct') {
-          const hits = c.vals.filter(v => v >= presenceThreshold).length;
-          return (hits / c.vals.length) * 100;
-        }
-
-        if (AGG === 'sum')    return c.sum;
-        if (AGG === 'median') return percentile(c.vals,50);
-        if (AGG === 'p95')    return percentile(c.vals,95);
-        if (AGG === 'max')    return c.max;
-        return c.sum / c.n; // mean
-      });
-
-      // Wh -> kWh post-conversion
-      if (metric === 'energy') {
-        col = col.map(v => (v == null ? v : v/1000));
-        unitOut = 'kWh';
-      } else if (metric === 'occupancy') {
-        if (AGG === 'seat_minutes') unitOut = 'person·min';
-        else if (AGG === 'seat_hours') unitOut = 'seat·h';
-        else if (AGG === 'mean' || AGG === 'max' || AGG === 'p95') unitOut = 'people';
-      }
-
-      // Budget check
-      const points = col.filter(v => v !== null).length;
-      if ((totalPoints + points) > Number(pointBudget)) {
-        truncated = true;
-        break;
-      }
-
-      // Append column
-      if (!grid) {
-        grid = col.map(v => [v]); // [24][1]
-      } else {
-        for (let r = 0; r < grid.length; r++) grid[r].push(col[r]);
-      }
-
-      // Track min/max
-      const flat = col.filter(v => v != null && !Number.isNaN(v));
-      if (flat.length) {
-        const localMin = Math.min(...flat);
-        const localMax = Math.max(...flat);
-        if (localMin < vmin) vmin = localMin;
-        if (localMax > vmax) vmax = localMax;
-      }
-
-      const labelDate = new Date(cursorEnd.getTime() - 1000); // 1s before stop
-      days.push(weekdayLabel(labelDate));
-      totalPoints += points;
-      loaded += 1;
-
-      cursorEnd = cursorStart;
-      cursorStart = new Date(cursorEnd.getTime() - DAY);
+      rows = deltas;
     }
 
-    // Empty shape if no data
-    if (!grid) {
+    // -------- Group by local calendar day and hour
+    const daysMap = new Map();
+    const presenceThreshold = (metric === 'lights') ? 0.5 : 1;
+
+    for (const r of rows) {
+      const v = r._value;
+      if (v == null || Number.isNaN(v)) continue;
+
+      const d = new Date(r._time);
+      const dayKey   = fmtDayKey.format(d);      // e.g. "2025-12-04"
+      const hourStr  = fmtHour.format(d);       // "00".."23"
+      const hh       = Number(hourStr);
+      if (Number.isNaN(hh)) continue;
+
+      let dayRec = daysMap.get(dayKey);
+      if (!dayRec) {
+        dayRec = {
+          label: weekdayLabel(d),
+          cells: Array.from({ length: 24 }, () => ({ n:0, sum:0, max:-Infinity, vals:[] }))
+        };
+        daysMap.set(dayKey, dayRec);
+      }
+
+      const cell = dayRec.cells[hh];
+      cell.n   += 1;
+      cell.sum += v;
+      if (v > cell.max) cell.max = v;
+      cell.vals.push(v);
+    }
+
+    // -------- If no data, return empty shape
+    if (!daysMap.size) {
       return res.json({
         meta: {
           tz, metric, agg: AGG, bin, unit: M.unit,
@@ -724,28 +688,119 @@ from(bucket: "${INFLUX_BUCKET}")
         },
         matrix: {
           rows: 24, cols: 0,
-          hours: Array.from({length:24}, (_,i)=>i),
+          hours: Array.from({ length: 24 }, (_, i) => i),
           days: [],
-          values: Array.from({length:24}, ()=>[])
+          values: Array.from({ length: 24 }, () => [])
         },
         truncated: false,
         loadedDays: 0
       });
     }
 
-    // Final response
+    // -------- Decide which day keys to include (newest → oldest, max 8)
+    const MAX_LABELS = MAX_CAL_DAYS;
+    const allKeysAsc = Array.from(daysMap.keys()).sort(); // "YYYY-MM-DD"
+    const selectedKeys = allKeysAsc.slice(-MAX_LABELS).reverse(); // newest first
+
+    // -------- Reduce cells -> values and build grid[24][N]
+    let unitOut = M.unit;
+    let vmin = Infinity, vmax = -Infinity;
+    let totalPoints = 0;
+    let truncated = false;
+
+    const grid = Array.from({ length: 24 }, () => []);
+    const days = [];
+
+    const reduceCell = (cell) => {
+      if (!cell || cell.n === 0) return null;
+
+      if (metric === 'occupancy') {
+        if (AGG === 'seat_minutes') return cell.sum;
+        if (AGG === 'seat_hours')   return cell.sum / 60;
+        if (AGG === 'max')          return cell.max;
+        if (AGG === 'p95')          return percentile(cell.vals, 95);
+        return cell.sum / cell.n; // mean people
+      }
+
+      if (metric === 'lights' && AGG === 'presence_pct') {
+        const hits = cell.vals.filter(v => v >= presenceThreshold).length;
+        return (hits / cell.vals.length) * 100;
+      }
+
+      if (AGG === 'sum')    return cell.sum;
+      if (AGG === 'median') return percentile(cell.vals, 50);
+      if (AGG === 'p95')    return percentile(cell.vals, 95);
+      if (AGG === 'max')    return cell.max;
+      return cell.sum / cell.n; // mean
+    };
+
+    for (const key of selectedKeys) {
+      const dayRec = daysMap.get(key);
+      const col = dayRec.cells.map(reduceCell);
+
+      const points = col.filter(v => v != null && !Number.isNaN(v)).length;
+      if (totalPoints + points > Number(pointBudget)) {
+        truncated = true;
+        break;
+      }
+
+      for (let r = 0; r < 24; r++) {
+        grid[r].push(col[r] == null || Number.isNaN(col[r]) ? null : col[r]);
+      }
+
+      const flat = col.filter(v => v != null && !Number.isNaN(v));
+      if (flat.length) {
+        const localMin = Math.min(...flat);
+        const localMax = Math.max(...flat);
+        if (localMin < vmin) vmin = localMin;
+        if (localMax > vmax) vmax = localMax;
+      }
+
+      days.push(dayRec.label);
+      totalPoints += points;
+    }
+
+    // -------- Post-process units
+    if (metric === 'energy') {
+      // convert Wh -> kWh
+      for (let r = 0; r < grid.length; r++) {
+        for (let c = 0; c < grid[r].length; c++) {
+          if (grid[r][c] != null && !Number.isNaN(grid[r][c])) {
+            grid[r][c] = grid[r][c] / 1000;
+          }
+        }
+      }
+      unitOut = 'kWh';
+      const flat = grid.flat().filter(v => v != null && !Number.isNaN(v));
+      if (flat.length) {
+        vmin = Math.min(...flat);
+        vmax = Math.max(...flat);
+      } else {
+        vmin = 0; vmax = 1;
+      }
+    }
+
+    if (metric === 'occupancy') {
+      if (AGG === 'seat_minutes')      unitOut = 'person·min';
+      else if (AGG === 'seat_hours')   unitOut = 'seat·h';
+      else if (AGG === 'mean' || AGG === 'max' || AGG === 'p95') unitOut = 'people';
+    }
+
+    if (vmin === Infinity) vmin = 0;
+    if (vmax === -Infinity) vmax = 1;
+
     return res.json({
       meta: {
         tz, metric, agg: AGG, bin, unit: unitOut,
         date_range: [S.toISOString(), E.toISOString()],
         filters: { tagKey: tagStrategy, values: tagValues },
-        min: (vmin === Infinity ? 0 : vmin),
-        max: (vmax === -Infinity ? 1 : vmax)
+        min: vmin,
+        max: vmax
       },
       matrix: {
         rows: 24,
         cols: grid[0].length,
-        hours: Array.from({length:24}, (_,i)=>i),
+        hours: Array.from({ length: 24 }, (_, i) => i),
         days,
         values: grid
       },
@@ -757,6 +812,8 @@ from(bucket: "${INFLUX_BUCKET}")
     return res.status(500).json({ error: 'Heatmap failed', details: String(e) });
   }
 });
+
+
 
 const admin = require('firebase-admin');
 

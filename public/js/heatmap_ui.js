@@ -7,7 +7,7 @@ import { renderHeatmap, drawLegend, PALETTES, format } from '/js/heatmap.js';
 
   // ===== Constants
   const TZ = 'America/New_York';
-  const MAX_DAYS = 8;           // hard cap (inclusive calendar labels)
+  const MAX_DAYS = 7;           // hard cap (inclusive calendar labels)
   const DEFAULT_DAYS = 7;       // default span
   const POINT_BUDGET = 100_000; // server cap mirrors this
 
@@ -157,21 +157,31 @@ import { renderHeatmap, drawLegend, PALETTES, format } from '/js/heatmap.js';
     });
   }
 
-  function primeForm(){
-    // Default last 7 days window (clamped later)
-    const now = new Date();
-    const end = toLocalDateTimeInput(now);
-    const start = toLocalDateTimeInput(new Date(now.getTime() - DEFAULT_DAYS*24*3600*1000));
-    $('#hmStart').value = start;
-    $('#hmEnd').value = end;
-    $('#hmRooms').value = current.rooms;
-    $('#hmMetric').value = current.metric;
-    $('#hmAgg').value = current.agg;
-    $('#hmBin').value = current.bin;
-    $('#hmScaleAuto').checked = current.scaleAuto;
-    $('#hmMin').value = current.min; $('#hmMax').value = current.max;
-    toggleScaleInputs();
-  }
+ function primeForm(){
+  // Default window: today and previous 6 days
+  const now = new Date();
+
+  // End = now (whatever the current time is)
+  const end = toLocalDateTimeInput(now);
+
+  // Start = local midnight of (today - 6 days)
+  const startDate = new Date(now);
+  startDate.setHours(0, 0, 0, 0);                  // snap to 00:00
+  startDate.setDate(startDate.getDate() - (DEFAULT_DAYS - 1));
+
+  const start = toLocalDateTimeInput(startDate);
+
+  $('#hmStart').value = start;
+  $('#hmEnd').value   = end;
+  $('#hmRooms').value = current.rooms;
+  $('#hmMetric').value = current.metric;
+  $('#hmAgg').value    = current.agg;
+  $('#hmBin').value    = current.bin;
+  $('#hmScaleAuto').checked = current.scaleAuto;
+  $('#hmMin').value = current.min;
+  $('#hmMax').value = current.max;
+  toggleScaleInputs();
+}
 
   function toggleScaleInputs(){
     const auto = $('#hmScaleAuto').checked;
@@ -227,15 +237,6 @@ import { renderHeatmap, drawLegend, PALETTES, format } from '/js/heatmap.js';
         legendMeta: `${payload?.meta?.metric || current.metric} aggregated by ${payload?.meta?.agg || current.agg || 'auto'}`
       }
     };
-
-    // ---- Ensure columns are oldest → newest (left → right)
-(function enforceOldestToNewest(){
-  // reverse day labels and each column of the grid
-  build.days = (build.days || []).slice().reverse();
-  if (Array.isArray(build.grid) && build.grid.length && Array.isArray(build.grid[0])) {
-    build.grid = build.grid.map(row => row.slice().reverse());
-  }
-})();
 
     // Compose headers
     const hdr = `${build.meta.metricLabel} • ${build.meta.aggLabel} • ${build.meta.unit} • ${fmtRange(new Date(start), new Date(end))}`;
@@ -371,13 +372,34 @@ function exportPng(){
 
   // ===== Helpers
   function clampRange(startStr, endStr){
-    let s = new Date(startStr), e = new Date(endStr);
-    if (e < s) [s,e] = [e,s];
-    const dayMs = 24*3600*1000;
-    const maxSpanMs = (MAX_DAYS-1)*dayMs;
-    if (e - s > maxSpanMs) s = new Date(e.getTime() - maxSpanMs);
-    return { start: toLocalDateTimeInput(s), end: toLocalDateTimeInput(e) };
+  let s = new Date(startStr);
+  let e = new Date(endStr);
+
+  // Ensure chronological order
+  if (e < s) {
+    const tmp = s;
+    s = e;
+    e = tmp;
   }
+
+  const dayMs     = 24 * 3600 * 1000;
+  const maxSpanMs = (MAX_DAYS - 1) * dayMs; // with MAX_DAYS = 7 → 6 days span
+
+  // Snap START to local midnight: we only care about the calendar day
+  s.setHours(0, 0, 0, 0);
+
+  // If the span is wider than allowed, move start up but keep it at midnight
+  if (e - s > maxSpanMs) {
+    s = new Date(e.getTime() - maxSpanMs);
+    s.setHours(0, 0, 0, 0);
+  }
+
+  return {
+    start: toLocalDateTimeInput(s),
+    end:   toLocalDateTimeInput(e)
+  };
+}
+
   function toLocalDateTimeInput(d){
     const pad = (n)=> String(n).padStart(2,'0');
     return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;

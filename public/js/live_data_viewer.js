@@ -245,20 +245,95 @@
     return series;
   }
 
-  const palette = ['#4e79a7','#f28e2b','#e15759','#76b7b2','#59a14f','#edc948','#b07aa1','#ff9da7'];
-  function datasetsFrom(series, chosenField) {
-    return Object.keys(series || {}).map((f, i) => {
-      const data = (series[f] || []).sort((a,b)=>new Date(a.t)-new Date(b.t))
-        .map(p => ({ x: new Date(p.t), y: p.v }));
-      return {
-        label: f, data,
-        borderColor: (f === chosenField) ? '#0ea5e9' : palette[i % palette.length],
-        backgroundColor: 'transparent',
-        borderWidth: 1.6, tension: 0.2,
-        pointRadius: 0, pointHoverRadius: 3, pointHitRadius: 6, spanGaps: true
-      };
-    });
+  // --- Forward-fill helpers (for occupancy) ---
+function parseEveryToMs(every) {
+  if (!every) return null;
+  const m = /^(\d+)(s|m|h)$/.exec(every);
+  if (!m) return null;
+  const n = Number(m[1]);
+  if (!Number.isFinite(n) || n <= 0) return null;
+
+  switch (m[2]) {
+    case 's': return n * 1000;
+    case 'm': return n * 60 * 1000;
+    case 'h': return n * 60 * 60 * 1000;
+    default:  return null;
   }
+}
+
+// Forward-fill a single series array [{t, v}, ...] based on `every`
+// But only for "reasonable" gaps (e.g. up to maxFillMinutes)
+function forwardFillSeries(arr, every, opts = {}) {
+  const stepMs = parseEveryToMs(every);
+  if (!stepMs || !Array.isArray(arr) || arr.length < 2) return arr;
+
+  const maxFillMinutes = opts.maxFillMinutes ?? 60; // cap forward-fill to 60 minutes
+  const maxFillMs = maxFillMinutes * 60 * 1000;
+
+  // Sort defensively
+  const sorted = [...arr].sort((a, b) => new Date(a.t) - new Date(b.t));
+  const out = [];
+
+  for (let i = 0; i < sorted.length - 1; i++) {
+    const cur  = sorted[i];
+    const next = sorted[i + 1];
+
+    const tCur  = +new Date(cur.t);
+    const tNext = +new Date(next.t);
+    const gap   = tNext - tCur;
+
+    out.push(cur); // always keep the real sample
+
+    // If gap is small, nothing to do (points are already close)
+    if (gap <= stepMs * 1.5) continue;
+
+    // If gap is "reasonable", forward-fill with last value
+    if (gap <= maxFillMs) {
+      let tFill = tCur + stepMs;
+      while (tFill < tNext - stepMs * 0.5) { // small tolerance for drift
+        out.push({
+          t: new Date(tFill).toISOString(),
+          v: cur.v // carry forward last value
+        });
+        tFill += stepMs;
+      }
+    }
+
+    // If gap > maxFillMs, we do NOT fill across it → there will be a visual gap,
+    // which is safer than pretending the last value held for many hours.
+  }
+
+  // Always push the last real sample
+  out.push(sorted[sorted.length - 1]);
+  return out;
+}
+
+  const palette = ['#4e79a7','#f28e2b','#e15759','#76b7b2','#59a14f','#edc948','#b07aa1','#ff9da7'];
+  function datasetsFrom(series, chosenField, onlyChosen = false) {
+  const keys = (!onlyChosen || !chosenField)
+    ? Object.keys(series || {})
+    : [chosenField];
+
+  return keys.map((f, i) => {
+    const data = (series[f] || [])
+      .sort((a, b) => new Date(a.t) - new Date(b.t))
+      .map(p => ({ x: new Date(p.t), y: p.v }));
+
+    return {
+      label: f,
+      data,
+      borderColor: (f === chosenField) ? '#0ea5e9' : palette[i % palette.length],
+      backgroundColor: 'transparent',
+      borderWidth: 1.6,
+      tension: 0.2,
+      pointRadius: 0,
+      pointHoverRadius: 3,
+      pointHitRadius: 6,
+      spanGaps: true
+    };
+  });
+}
+
 
   function domainFromSeries(series) {
     let tMin = Infinity, tMax = -Infinity;
@@ -375,8 +450,31 @@ async function queryAndDrawExec({
     json.series = normalizeEnergy(json.series);
   }
 
-  const series = json.series || {};
-  const domain = domainFromSeries(series) || domainFromRequest({ minutes, startISO, stopISO });
+let series = json.series || {};
+
+const isOcc = (category === 'room' && field === 'count');
+
+// Only forward-fill occupancy for windows up to 24h
+const allowFwd =
+  isOcc &&
+  Array.isArray(series.count) &&
+  every &&
+  (minutes == null || Number(minutes) <= 1440);  // 1440 min = 24h
+
+if (allowFwd) {
+  series = { ...series }; // shallow clone
+  series.count = forwardFillSeries(series.count, every, {
+  maxFillMinutes: 60   // or 45 if you want it tighter
+});
+}
+
+
+const domain =
+  domainFromSeries(series) ||
+  domainFromRequest({ minutes, startISO, stopISO });
+
+const datasets = datasetsFrom(series, field, isOcc);
+
 
   // If no data at all
   const hasAny = Object.values(series || {}).some(arr => (arr || []).length > 0);
@@ -387,23 +485,24 @@ async function queryAndDrawExec({
     return;
   }
 
-  // Occupancy mode: room count as bar chart
-const isOcc = (category === 'room' && field === 'count');
-
-const datasets = datasetsFrom(series, field);
-
+// Occupancy: bar chart with **narrow** bars so they never overlap
 if (isOcc) {
   datasets.forEach(ds => {
-    ds.type = 'line';
-    ds.borderColor = '#38bdf8';
-    ds.backgroundColor = 'transparent';
-    ds.borderWidth = 2;
+    ds.type = 'bar';
 
-    // 🔥 KEY: force perfect 90-degree step transitions
-    ds.tension = 0;
-    ds.stepped = 'middle';
+    ds.backgroundColor   = 'rgba(56, 189, 248, 0.7)';
+    ds.borderColor       = 'rgba(56, 189, 248, 1)';
+    ds.borderWidth       = 0;
 
-    ds.pointRadius = 0;
+    // CURRENT:
+    // ds.categoryPercentage = 0.7;
+    // ds.barPercentage      = 0.7;
+    // ds.maxBarThickness    = 18;
+
+    // NEW: much slimmer bars so they clearly don't "overlap"
+    ds.categoryPercentage = 0.7;  // slot usage
+    ds.barPercentage      = 0.7;   // bar inside slot
+    ds.maxBarThickness    = 14;     // hard cap in pixels
   });
 }
 
@@ -411,7 +510,7 @@ if (isOcc) {
   if (old) old.destroy();
 
   const ctx = canvas.getContext('2d');
-  const chartType = isOcc ? 'line' : 'line';
+  const chartType = isOcc ? 'bar' : 'line';
 
   const chart = new Chart(ctx, {
     type: chartType,
@@ -599,12 +698,24 @@ window.addEventListener('openHistoryForMetric', async (ev) => {
   // Use smart bucket sizing for both:
   // - env sensors: target ~20 points
   // - occupancy:   target ~50 bars
-  const every = pickEvery({
-    minutes,
-    startISO,
-    stopISO,
-    targetPts: isOccField ? 50 : 20
-  });
+ let every;
+
+  if (isOccField) {
+    const minsNum = minutes != null ? Number(minutes) : null;
+
+    if (minsNum && minsNum <= 180) {
+      every = '2m';
+    } else if (minsNum && minsNum <= 720) {
+      every = '5m';
+    } else if (minsNum && minsNum <= 1440) {
+      every = '20m';
+    } else {
+      //  >24h – rely on pickEvery and we won't forward-fill
+      every = pickEvery({ minutes, startISO, stopISO, targetPts: 50 });
+    }
+  } else {
+    every = pickEvery({ minutes, startISO, stopISO, targetPts: 20 });
+  }
 
   dom.title.textContent = `${getDevice()} — ${metricLabel}`;
 

@@ -55,7 +55,10 @@ drawerNav.addEventListener('click', (e)=>{
   window.dispatchEvent(new Event('open:alerts'));
   return;
 };
-  if (key === 'summaries')openPopup('Summaries', '<p>Daily/weekly summaries, KPIs, and statistics.</p>');
+  if (key === 'summaries') {
+  window.dispatchEvent(new Event('open:summaries'));
+  return;
+}
 });
 
 /* ===== Toast (shared) ===== */
